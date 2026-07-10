@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+
+<html lang="zh"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>AI RESEARCH WORKSPACE - Report Export Page</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface-container": "#ededf9",
+                        "on-surface": "#191b23",
+                        "primary-fixed-dim": "#b4c5ff",
+                        "on-secondary-fixed": "#0b1c30",
+                        "surface": "#faf8ff",
+                        "error": "#ba1a1a",
+                        "inverse-on-surface": "#f0f0fb",
+                        "background": "#faf8ff",
+                        "secondary-fixed-dim": "#b7c8e1",
+                        "on-error": "#ffffff",
+                        "surface-variant": "#e1e2ed",
+                        "secondary-fixed": "#d3e4fe",
+                        "surface-bright": "#faf8ff",
+                        "on-secondary-fixed-variant": "#38485d",
+                        "on-tertiary-container": "#ffede6",
+                        "on-tertiary-fixed-variant": "#7d2d00",
+                        "on-tertiary": "#ffffff",
+                        "on-surface-variant": "#434655",
+                        "primary": "#004ac6",
+                        "on-primary-container": "#eeefff",
+                        "tertiary-container": "#bc4800",
+                        "surface-dim": "#d9d9e5",
+                        "on-background": "#191b23",
+                        "on-primary-fixed": "#00174b",
+                        "surface-container-high": "#e7e7f3",
+                        "on-primary-fixed-variant": "#003ea8",
+                        "on-primary": "#ffffff",
+                        "on-tertiary-fixed": "#360f00",
+                        "secondary": "#505f76",
+                        "surface-container-highest": "#e1e2ed",
+                        "outline": "#737686",
+                        "surface-container-lowest": "#ffffff",
+                        "surface-container-low": "#f3f3fe",
+                        "inverse-primary": "#b4c5ff",
+                        "tertiary": "#943700",
+                        "inverse-surface": "#2e3039",
+                        "on-error-container": "#93000a",
+                        "on-secondary": "#ffffff",
+                        "outline-variant": "#c3c6d7",
+                        "error-container": "#ffdad6",
+                        "secondary-container": "#d0e1fb",
+                        "primary-container": "#2563eb",
+                        "surface-tint": "#0053db",
+                        "tertiary-fixed": "#ffdbcd",
+                        "on-secondary-container": "#54647a",
+                        "primary-fixed": "#dbe1ff",
+                        "tertiary-fixed-dim": "#ffb596"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "gutter": "16px",
+                        "topbar_height": "56px",
+                        "sidebar_width": "260px",
+                        "stack_gap_sm": "8px",
+                        "container_padding": "24px",
+                        "stack_gap_md": "16px"
+                    },
+                    "fontFamily": {
+                        "label-sm": ["Inter"],
+                        "headline-xl": ["Inter"],
+                        "body-md": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "headline-md": ["Inter"],
+                        "headline-lg": ["Inter"],
+                        "label-md": ["Inter"]
+                    },
+                    "fontSize": {
+                        "label-sm": ["11px", { "lineHeight": "14px", "letterSpacing": "0.03em", "fontWeight": "600" }],
+                        "headline-xl": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "body-md": ["14px", { "lineHeight": "22px", "fontWeight": "400" }],
+                        "body-lg": ["16px", { "lineHeight": "26px", "fontWeight": "400" }],
+                        "headline-md": ["18px", { "lineHeight": "28px", "fontWeight": "600" }],
+                        "headline-lg": ["24px", { "lineHeight": "32px", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "500" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .citation-link {
+            transition: all 0.2s ease-in-out;
+        }
+        .citation-link:hover, .citation-link.active {
+            background-color: #dbe1ff;
+            color: #004ac6;
+            border-radius: 4px;
+            padding: 0 4px;
+        }
+        .reference-item {
+            transition: all 0.2s ease-in-out;
+            cursor: pointer;
+        }
+        .reference-item:hover, .reference-item.active {
+            background-color: #f3f3fe;
+            border-left-color: #004ac6;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-surface h-screen w-screen overflow-hidden flex font-body-md">
+<!-- Sidebar (Shared Component) -->
+<aside class="fixed left-0 top-0 h-full w-[sidebar_width] border-r border-outline-variant bg-surface dark:bg-surface-dim flex flex-col justify-between py-gutter px-4 z-20">
+<div>
+<!-- Header -->
+<div class="flex items-center gap-3 mb-8 px-2">
+<span class="material-symbols-outlined text-primary text-[32px]">document_scanner</span>
+<div>
+<h1 class="text-headline-md font-headline-md font-extrabold text-on-surface tracking-tight leading-none">AI RESEARCH</h1>
+<p class="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest mt-1">工作台</p>
+</div>
+</div>
+<!-- Navigation Links -->
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-3 py-2 px-3 rounded-lg text-on-surface-variant hover:bg-surface-container-low transition-colors text-label-md font-label-md" href="#">
+<span class="material-symbols-outlined">search</span>
+<span>搜索结果</span>
+</a>
+<a class="flex items-center gap-3 py-2 px-3 rounded-lg text-on-surface-variant hover:bg-surface-container-low transition-colors text-label-md font-label-md" href="#">
+<span class="material-symbols-outlined">database</span>
+<span>资料库</span>
+</a>
+<a class="flex items-center gap-3 py-2 px-3 rounded-lg text-on-surface-variant hover:bg-surface-container-low transition-colors text-label-md font-label-md" href="#">
+<span class="material-symbols-outlined">format_list_bulleted</span>
+<span>大纲</span>
+</a>
+<a class="flex items-center gap-3 py-2 px-3 rounded-lg bg-surface-container-high text-primary font-bold border-l-4 border-primary transition-all duration-150 text-label-md font-label-md shadow-sm" href="#">
+<span class="material-symbols-outlined">description</span>
+<span>报告</span>
+</a>
+</nav>
+</div>
+<!-- Footer Actions -->
+<div class="flex flex-col gap-2 mt-auto border-t border-outline-variant pt-4">
+<a class="flex items-center gap-3 py-2 px-3 rounded-lg text-on-surface-variant hover:bg-surface-container-low transition-colors text-label-md font-label-md" href="#">
+<span class="material-symbols-outlined">settings</span>
+<span>设置</span>
+</a>
+<a class="flex items-center gap-3 py-2 px-3 rounded-lg text-on-surface-variant hover:bg-surface-container-low transition-colors text-label-md font-label-md" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">account_circle</span>
+<span>个人资料</span>
+</a>
+</div>
+</aside>
+<!-- Main Content Area -->
+<main class="ml-[sidebar_width] flex-1 flex flex-col h-full bg-surface-container-lowest relative">
+<!-- TopAppBar (Shared Component) -->
+<header class="h-topbar_height border-b border-outline-variant bg-surface-container-lowest flex justify-between items-center px-container_padding shrink-0 z-10 sticky top-0">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-2">
+<span class="text-label-md font-label-md font-bold text-on-surface">AI 驱动的低代码平台市场研究</span>
+<span class="text-on-surface-variant mx-2">/</span>
+<span class="text-label-md font-label-md text-on-surface-variant">最终报告</span>
+</div>
+<span class="text-label-sm font-label-sm bg-[#EFF6FF] text-primary px-2 py-1 rounded border border-primary-fixed-dim">状态: 进行中</span>
+</div>
+<div class="flex items-center gap-4">
+<!-- Document Actions -->
+<button class="text-label-md font-label-md text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1">
+<span class="material-symbols-outlined text-[18px]">share</span> 分享
+                </button>
+<button class="bg-primary text-on-primary hover:bg-on-primary-fixed-variant transition-colors px-4 py-1.5 rounded-lg text-label-md font-label-md flex items-center gap-2 shadow-sm">
+<span class="material-symbols-outlined text-[18px]">picture_as_pdf</span> 导出 PDF
+                </button>
+<div class="w-px h-6 bg-outline-variant mx-2"></div>
+<!-- Trailing Icons -->
+<button class="text-on-surface-variant hover:text-primary transition-colors focus:ring-2 ring-primary ring-opacity-50 rounded-full p-1">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="text-on-surface-variant hover:text-primary transition-colors focus:ring-2 ring-primary ring-opacity-50 rounded-full p-1">
+<span class="material-symbols-outlined">help_outline</span>
+</button>
+</div>
+</header>
+<!-- Document Canvas Split Layout -->
+<div class="flex-1 flex overflow-hidden">
+<!-- Editor Pane (Center) -->
+<section class="flex-1 overflow-y-auto px-[10%] py-12 scroll-smooth bg-[#F8FAFC]">
+<div class="max-w-3xl mx-auto bg-white p-12 rounded-xl border border-outline-variant shadow-sm min-h-full">
+<h1 class="text-headline-xl font-headline-xl text-on-surface mb-8 border-b border-outline-variant pb-4">AI 驱动的低代码/无代码平台：2024 年市场分析与趋势预测</h1>
+<div class="prose prose-slate max-w-none text-body-lg font-body-lg text-on-surface-variant leading-relaxed space-y-6">
+<p>
+                            近年来，企业数字化转型的加速推进，使得对应用程序开发的需求呈现爆炸式增长。然而，专业开发人员的短缺成为制约企业创新速度的瓶颈。在此背景下，低代码/无代码 (LC/NC) 平台应运而生，并逐渐成为企业 IT 战略的重要组成部分 <a class="citation-link text-primary font-medium text-sm align-super" data-ref="1" href="#ref-1">[1]</a>。
+                        </p>
+<h2 class="text-headline-md font-headline-md text-on-surface mt-8 mb-4">核心技术驱动力：生成式 AI 的融合</h2>
+<p>
+                            当前低代码市场的最显著变革是生成式 AI (Generative AI) 技术的深度融合。传统低代码平台主要依赖可视化拖拽组件来构建应用，而新一代“AI 驱动的低代码平台”则允许用户通过自然语言提示 (Prompts) 直接生成应用结构、代码片段甚至完整的业务逻辑 <a class="citation-link text-primary font-medium text-sm align-super" data-ref="2" href="#ref-2">[2]</a>。
+                        </p>
+<p>
+                            据领先的市场研究机构预测，到 2026 年，集成生成式 AI 功能将成为主流低代码平台的标配，这将使非技术业务用户（即“平民开发者”）的应用交付速度提高至少 40% <a class="citation-link text-primary font-medium text-sm align-super" data-ref="3" href="#ref-3">[3]</a>。这种转变不仅降低了技术门槛，还极大地拓宽了平台的应用场景，涵盖了从内部数据仪表盘到复杂的客户交互系统。
+                        </p>
+<div class="bg-[#EFF6FF] border-l-2 border-primary p-4 rounded-r-lg my-6 text-sm text-on-surface">
+<div class="flex items-center gap-2 mb-2">
+<span class="material-symbols-outlined text-primary text-[16px]">smart_toy</span>
+<span class="font-label-sm text-primary uppercase">AI 综合笔记</span>
+</div>
+<p>AI 辅助开发工具在减少样板代码编写和智能错误预测方面表现出显著优势，特别是大型语言模型 (LLM) 在代码生成方面的准确率已达到商业可用水平。</p>
+</div>
+<h2 class="text-headline-md font-headline-md text-on-surface mt-8 mb-4">市场竞争格局与主要参与者</h2>
+<p>
+                            市场呈现出高度竞争的态势。一方面，科技巨头（如微软的 Power Platform，Salesforce 的 Einstein Automate）正在积极整合其强大的 AI 模型库来增强现有平台能力 <a class="citation-link text-primary font-medium text-sm align-super" data-ref="4" href="#ref-4">[4]</a>。另一方面，众多新兴初创公司则专注于特定垂直行业的 AI 低代码解决方案，试图通过高度定制化和敏捷性占据市场份额。
+                        </p>
+</div>
+</div>
+</section>
+<!-- Reference Panel (Right Sidebar) -->
+<aside class="w-[380px] border-l border-outline-variant bg-surface-container-lowest flex flex-col shrink-0">
+<div class="h-14 border-b border-outline-variant flex items-center px-4 bg-surface-container-lowest">
+<span class="material-symbols-outlined text-on-surface-variant mr-2">format_quote</span>
+<h3 class="text-label-md font-label-md font-bold text-on-surface uppercase tracking-wider">引用来源面板</h3>
+</div>
+<div class="flex-1 overflow-y-auto p-4 space-y-4 bg-surface">
+<!-- Reference Item 1 -->
+<div class="reference-item p-4 rounded-xl border border-outline-variant bg-white border-l-4 border-l-transparent" id="ref-1-panel">
+<div class="flex justify-between items-start mb-2">
+<span class="text-label-sm font-label-sm text-primary bg-primary-fixed px-2 py-0.5 rounded">引用 [1]</span>
+<span class="material-symbols-outlined text-on-surface-variant text-[16px]">open_in_new</span>
+</div>
+<h4 class="text-body-md font-headline-md text-on-surface mb-1">Gartner: The Future of Enterprise Application Development</h4>
+<p class="text-label-md font-label-md text-on-surface-variant">Gartner Research Report, Q3 2023. Highlights the severe shortage of professional developers and the rise of LC/NC platforms as a strategic necessity.</p>
+<div class="mt-3 flex gap-2">
+<span class="text-[10px] font-label-sm text-outline bg-surface-dim px-1.5 py-0.5 rounded">Market Trend</span>
+</div>
+</div>
+<!-- Reference Item 2 -->
+<div class="reference-item p-4 rounded-xl border border-outline-variant bg-white border-l-4 border-l-transparent" id="ref-2-panel">
+<div class="flex justify-between items-start mb-2">
+<span class="text-label-sm font-label-sm text-primary bg-primary-fixed px-2 py-0.5 rounded">引用 [2]</span>
+<span class="material-symbols-outlined text-on-surface-variant text-[16px]">picture_as_pdf</span>
+</div>
+<h4 class="text-body-md font-headline-md text-on-surface mb-1">Integrating LLMs into Visual Programming Environments</h4>
+<p class="text-label-md font-label-md text-on-surface-variant">IEEE Software Engineering Conference Proceedings. Discusses the technical architecture of prompt-based application generation.</p>
+<div class="mt-3 flex gap-2">
+<span class="text-[10px] font-label-sm text-outline bg-surface-dim px-1.5 py-0.5 rounded">Technical Paper</span>
+</div>
+</div>
+<!-- Reference Item 3 -->
+<div class="reference-item p-4 rounded-xl border border-outline-variant bg-white border-l-4 border-l-transparent" id="ref-3-panel">
+<div class="flex justify-between items-start mb-2">
+<span class="text-label-sm font-label-sm text-primary bg-primary-fixed px-2 py-0.5 rounded">引用 [3]</span>
+<span class="material-symbols-outlined text-on-surface-variant text-[16px]">language</span>
+</div>
+<h4 class="text-body-md font-headline-md text-on-surface mb-1">Forrester Wave: Low-Code Development Platforms For Citizen Developers</h4>
+<p class="text-label-md font-label-md text-on-surface-variant">Analysis of productivity gains projected for business users leveraging AI-assisted platforms by 2026.</p>
+<div class="mt-3 flex gap-2">
+<span class="text-[10px] font-label-sm text-outline bg-surface-dim px-1.5 py-0.5 rounded">Industry Analysis</span>
+</div>
+</div>
+<!-- Reference Item 4 -->
+<div class="reference-item p-4 rounded-xl border border-outline-variant bg-white border-l-4 border-l-transparent" id="ref-4-panel">
+<div class="flex justify-between items-start mb-2">
+<span class="text-label-sm font-label-sm text-primary bg-primary-fixed px-2 py-0.5 rounded">引用 [4]</span>
+<span class="material-symbols-outlined text-on-surface-variant text-[16px]">article</span>
+</div>
+<h4 class="text-body-md font-headline-md text-on-surface mb-1">Tech Giant Strategies in the AI Low-Code Space</h4>
+<p class="text-label-md font-label-md text-on-surface-variant">TechCrunch editorial analyzing Microsoft Copilot integration in PowerApps and Salesforce's AI initiatives.</p>
+<div class="mt-3 flex gap-2">
+<span class="text-[10px] font-label-sm text-outline bg-surface-dim px-1.5 py-0.5 rounded">News Article</span>
+</div>
+</div>
+</div>
+</aside>
+</div>
+</main>
+<script>
+        // Simple interaction script to connect citations in text with the reference panel
+        document.addEventListener('DOMContentLoaded', () => {
+            const citations = document.querySelectorAll('.citation-link');
+            const referencePanels = document.querySelectorAll('.reference-item');
+
+            function clearActiveStates() {
+                citations.forEach(c => c.classList.remove('active'));
+                referencePanels.forEach(p => p.classList.remove('active'));
+            }
+
+            citations.forEach(citation => {
+                citation.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    clearActiveStates();
+                    
+                    const refId = citation.getAttribute('data-ref');
+                    citation.classList.add('active');
+                    
+                    const panel = document.getElementById(`ref-${refId}-panel`);
+                    if (panel) {
+                        panel.classList.add('active');
+                        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                    }
+                });
+            });
+
+            referencePanels.forEach(panel => {
+                panel.addEventListener('mouseenter', () => {
+                     const id = panel.id.split('-')[1];
+                     const citation = document.querySelector(`.citation-link[data-ref="${id}"]`);
+                     if(citation) citation.classList.add('bg-primary-fixed', 'text-primary');
+                });
+                panel.addEventListener('mouseleave', () => {
+                     const id = panel.id.split('-')[1];
+                     const citation = document.querySelector(`.citation-link[data-ref="${id}"]`);
+                     if(citation && !citation.classList.contains('active')) citation.classList.remove('bg-primary-fixed', 'text-primary');
+                });
+            });
+        });
+    </script>
+</body></html>

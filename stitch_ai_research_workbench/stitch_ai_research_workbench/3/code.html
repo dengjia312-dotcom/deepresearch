@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+
+<html lang="zh-CN"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Source Detail Page - AI Research Workspace</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+          darkMode: "class",
+          theme: {
+            extend: {
+              "colors": {
+                      "surface-container": "#ededf9",
+                      "on-surface": "#191b23",
+                      "primary-fixed-dim": "#b4c5ff",
+                      "on-secondary-fixed": "#0b1c30",
+                      "surface": "#faf8ff",
+                      "error": "#ba1a1a",
+                      "inverse-on-surface": "#f0f0fb",
+                      "background": "#faf8ff",
+                      "secondary-fixed-dim": "#b7c8e1",
+                      "on-error": "#ffffff",
+                      "surface-variant": "#e1e2ed",
+                      "secondary-fixed": "#d3e4fe",
+                      "surface-bright": "#faf8ff",
+                      "on-secondary-fixed-variant": "#38485d",
+                      "on-tertiary-container": "#ffede6",
+                      "on-tertiary-fixed-variant": "#7d2d00",
+                      "on-tertiary": "#ffffff",
+                      "on-surface-variant": "#434655",
+                      "primary": "#004ac6",
+                      "on-primary-container": "#eeefff",
+                      "tertiary-container": "#bc4800",
+                      "surface-dim": "#d9d9e5",
+                      "on-background": "#191b23",
+                      "on-primary-fixed": "#00174b",
+                      "surface-container-high": "#e7e7f3",
+                      "on-primary-fixed-variant": "#003ea8",
+                      "on-primary": "#ffffff",
+                      "on-tertiary-fixed": "#360f00",
+                      "secondary": "#505f76",
+                      "surface-container-highest": "#e1e2ed",
+                      "outline": "#737686",
+                      "surface-container-lowest": "#ffffff",
+                      "surface-container-low": "#f3f3fe",
+                      "inverse-primary": "#b4c5ff",
+                      "tertiary": "#943700",
+                      "inverse-surface": "#2e3039",
+                      "on-error-container": "#93000a",
+                      "on-secondary": "#ffffff",
+                      "outline-variant": "#c3c6d7",
+                      "error-container": "#ffdad6",
+                      "secondary-container": "#d0e1fb",
+                      "primary-container": "#2563eb",
+                      "surface-tint": "#0053db",
+                      "tertiary-fixed": "#ffdbcd",
+                      "on-secondary-container": "#54647a",
+                      "primary-fixed": "#dbe1ff",
+                      "tertiary-fixed-dim": "#ffb596"
+              },
+              "borderRadius": {
+                      "DEFAULT": "0.25rem",
+                      "lg": "0.5rem",
+                      "xl": "0.75rem",
+                      "full": "9999px"
+              },
+              "spacing": {
+                      "gutter": "16px",
+                      "topbar_height": "56px",
+                      "sidebar_width": "260px",
+                      "stack_gap_sm": "8px",
+                      "container_padding": "24px",
+                      "stack_gap_md": "16px"
+              },
+              "fontFamily": {
+                      "label-sm": ["Inter"],
+                      "headline-xl": ["Inter"],
+                      "body-md": ["Inter"],
+                      "body-lg": ["Inter"],
+                      "headline-md": ["Inter"],
+                      "headline-lg": ["Inter"],
+                      "label-md": ["Inter"]
+              },
+              "fontSize": {
+                      "label-sm": ["11px", {"lineHeight": "14px", "letterSpacing": "0.03em", "fontWeight": "600"}],
+                      "headline-xl": ["32px", {"lineHeight": "40px", "letterSpacing": "-0.02em", "fontWeight": "700"}],
+                      "body-md": ["14px", {"lineHeight": "22px", "fontWeight": "400"}],
+                      "body-lg": ["16px", {"lineHeight": "26px", "fontWeight": "400"}],
+                      "headline-md": ["18px", {"lineHeight": "28px", "fontWeight": "600"}],
+                      "headline-lg": ["24px", {"lineHeight": "32px", "letterSpacing": "-0.01em", "fontWeight": "600"}],
+                      "label-md": ["12px", {"lineHeight": "16px", "letterSpacing": "0.01em", "fontWeight": "500"}]
+              }
+            }
+          }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .ai-response-block {
+            background-color: #EFF6FF;
+            border-left: 2px solid #2563EB;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body-md min-h-screen flex">
+<!-- SideNavBar -->
+<nav class="hidden md:flex fixed left-0 top-0 h-full w-[sidebar_width] border-r border-outline-variant bg-surface dark:bg-surface-dim flex-col justify-between py-gutter px-4 z-20">
+<div>
+<!-- Header Brand -->
+<div class="flex items-center gap-3 mb-8 px-2">
+<div class="flex items-center justify-center w-10 h-10 rounded-lg bg-primary-container text-on-primary-container">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">document_scanner</span>
+</div>
+<div>
+<h1 class="text-headline-md font-headline-md font-extrabold text-on-surface dark:text-inverse-on-surface leading-tight tracking-tight uppercase">AI 研究</h1>
+<p class="text-label-sm font-label-sm text-on-surface-variant uppercase tracking-widest">工作台</p>
+</div>
+</div>
+<!-- Navigation Links -->
+<ul class="space-y-1">
+<li>
+<a class="flex items-center gap-3 text-on-surface-variant dark:text-surface-variant hover:bg-surface-container-low dark:hover:bg-on-secondary-fixed-variant transition-colors px-3 py-2 rounded-md" href="#">
+<span class="material-symbols-outlined text-lg">search</span>
+<span class="text-label-md font-label-md">搜索结果</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 bg-surface-container-high dark:bg-secondary text-primary dark:text-primary-fixed-dim font-bold border-l-4 border-primary px-3 py-2 rounded-r-md transition-all duration-150" href="#">
+<span class="material-symbols-outlined text-lg" style="font-variation-settings: 'FILL' 1;">database</span>
+<span class="text-label-md font-label-md">资料池</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 text-on-surface-variant dark:text-surface-variant hover:bg-surface-container-low dark:hover:bg-on-secondary-fixed-variant transition-colors px-3 py-2 rounded-md" href="#">
+<span class="material-symbols-outlined text-lg">format_list_bulleted</span>
+<span class="text-label-md font-label-md">大纲</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 text-on-surface-variant dark:text-surface-variant hover:bg-surface-container-low dark:hover:bg-on-secondary-fixed-variant transition-colors px-3 py-2 rounded-md" href="#">
+<span class="material-symbols-outlined text-lg">description</span>
+<span class="text-label-md font-label-md">报告</span>
+</a>
+</li>
+</ul>
+</div>
+<!-- Footer Links -->
+<ul class="space-y-1">
+<li>
+<a class="flex items-center gap-3 text-on-surface-variant dark:text-surface-variant hover:bg-surface-container-low dark:hover:bg-on-secondary-fixed-variant transition-colors px-3 py-2 rounded-md" href="#">
+<span class="material-symbols-outlined text-lg">settings</span>
+<span class="text-label-md font-label-md">设置</span>
+</a>
+</li>
+<li>
+<a class="flex items-center gap-3 text-on-surface-variant dark:text-surface-variant hover:bg-surface-container-low dark:hover:bg-on-secondary-fixed-variant transition-colors px-3 py-2 rounded-md" href="#">
+<span class="material-symbols-outlined text-lg">account_circle</span>
+<span class="text-label-md font-label-md">个人中心</span>
+</a>
+</li>
+</ul>
+</nav>
+<!-- Main Content Area -->
+<div class="flex-1 md:ml-[260px] flex flex-col min-h-screen">
+<!-- TopAppBar -->
+<header class="fixed top-0 right-0 h-topbar_height w-full md:w-[calc(100%-260px)] bg-surface-container-lowest dark:bg-surface-container border-b border-outline-variant flex justify-between items-center px-container_padding z-10">
+<div class="flex items-center gap-4">
+<button class="md:hidden text-on-surface-variant p-2 rounded-full hover:bg-surface-container-low">
+<span class="material-symbols-outlined">menu</span>
+</button>
+<div class="text-label-md font-label-md font-bold text-on-surface flex items-center gap-2">
+<a class="text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1" href="#">
+<span class="material-symbols-outlined text-sm">arrow_back</span>
+                        返回资料池
+                    </a>
+</div>
+</div>
+<div class="hidden md:flex items-center space-x-6">
+<span class="text-label-md font-label-md text-primary font-bold border-b-2 border-primary pb-1">状态: 进行中</span>
+</div>
+<div class="flex items-center gap-4">
+<button class="text-on-surface-variant hover:text-primary dark:hover:text-primary-fixed-dim transition-colors focus:ring-2 focus:ring-primary focus:ring-opacity-50 rounded-full p-1">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="text-on-surface-variant hover:text-primary dark:hover:text-primary-fixed-dim transition-colors focus:ring-2 focus:ring-primary focus:ring-opacity-50 rounded-full p-1">
+<span class="material-symbols-outlined">help_outline</span>
+</button>
+<div class="w-8 h-8 rounded-full bg-surface-variant border border-outline-variant overflow-hidden">
+<img alt="Researcher Avatar" class="w-full h-full object-cover" data-alt="A small circular avatar of a professional researcher, clean background, modern corporate style, highly detailed portrait, soft natural lighting." src="https://lh3.googleusercontent.com/aida-public/AB6AXuALUu_RrrkWXxdHjxzbf5Jv_aDKZvWR_6aHjR7oqf5HHVu6pziq1g0X8iv8Kf-b20JkGXYw29zy5yYe2AKlCxMs5-M3Hd0_l4VnsVf9osnUnAVUeTQjrjzPeP2UMgc1CYsGyCIUqaoMvtK5TZ3Slb8TvO4_p6eJrgFKqUAfTrsWpO14o5P0qu4eakcsqSXev66OVqQUqpjQrwWQBSDDPe2y2jVCqENiFmwbp_AcwYsvbevlt9kqyP05CK6Sk0W66tO4DtBT2rPJ7fG8"/>
+</div>
+</div>
+</header>
+<!-- Canvas -->
+<main class="flex-1 mt-topbar_height p-container_padding bg-background overflow-y-auto">
+<!-- Source Header -->
+<div class="mb-6 bg-surface-container-lowest p-6 rounded-lg border border-outline-variant">
+<div class="flex justify-between items-start mb-4">
+<h2 class="text-headline-lg font-headline-lg text-on-surface">2023年中国低代码市场现状与未来发展趋势分析</h2>
+<div class="flex items-center gap-2">
+<button class="flex items-center gap-2 px-4 py-2 bg-primary-container text-on-primary-container text-label-md font-label-md rounded-md hover:bg-primary hover:text-on-primary transition-colors">
+<span class="material-symbols-outlined text-sm" style="font-variation-settings: 'FILL' 1;">bookmark_added</span>
+                            已存入资料池
+                        </button>
+</div>
+</div>
+<div class="flex flex-wrap items-center gap-4 text-sm text-on-surface-variant">
+<a class="flex items-center gap-1 text-primary hover:underline" href="https://example-report.com/lowcode-2023" target="_blank">
+<span class="material-symbols-outlined text-sm">link</span>
+                        https://example-report.com/lowcode-2023
+                    </a>
+<span class="flex items-center gap-1">
+<span class="material-symbols-outlined text-sm">schedule</span>
+                        2023-11-15
+                    </span>
+<span class="flex items-center gap-1">
+<span class="material-symbols-outlined text-sm">business</span>
+                        Gartner Research
+                    </span>
+<span class="flex items-center gap-1 px-2 py-1 bg-surface-container-high rounded text-xs font-medium">
+<span class="material-symbols-outlined text-sm text-emerald-600" style="font-variation-settings: 'FILL' 1;">verified</span>
+                        高可信度
+                    </span>
+</div>
+</div>
+<!-- Content Split View -->
+<div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+<!-- Left Column: Content/Summary (60%) -->
+<div class="lg:col-span-7 space-y-6">
+<!-- AI Summary Block -->
+<div class="ai-response-block p-5 rounded-lg border border-outline-variant shadow-sm hover:shadow-md transition-shadow">
+<div class="flex items-center gap-2 mb-3 text-primary font-medium">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">smart_toy</span>
+                            AI 智能摘要
+                        </div>
+<p class="text-body-md text-on-surface mb-3 leading-relaxed">
+                            报告指出，2023年中国低代码市场规模预计达到150亿元人民币，同比增长超40%。企业数字化转型的加速和IT人才短缺是主要驱动力。未来三年，随着AI大模型的融入，低代码平台将向“智能原生”演进，进一步降低开发门槛，提升复杂场景的应用构建能力。
+                        </p>
+<div class="flex flex-wrap gap-2 mt-4">
+<span class="px-2 py-1 bg-surface-container rounded-sm text-label-sm font-label-sm text-on-surface-variant flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">tag</span>市场规模
+                            </span>
+<span class="px-2 py-1 bg-surface-container rounded-sm text-label-sm font-label-sm text-on-surface-variant flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">tag</span>增长趋势
+                            </span>
+<span class="px-2 py-1 bg-surface-container rounded-sm text-label-sm font-label-sm text-on-surface-variant flex items-center gap-1">
+<span class="material-symbols-outlined text-[14px]">tag</span>AI集成
+                            </span>
+</div>
+</div>
+<!-- Original Content Snippet -->
+<div class="bg-surface-container-lowest p-6 rounded-lg border border-outline-variant shadow-sm hover:shadow-md transition-shadow">
+<h3 class="text-headline-md font-headline-md text-on-surface mb-4 border-b border-outline-variant pb-2">原文片段提取</h3>
+<div class="prose prose-sm max-w-none text-on-surface-variant space-y-4">
+<p>在宏观经济承压的背景下，企业对降本增效的需求愈发迫切。传统的软件开发模式周期长、成本高，难以满足业务部门快速变化的敏捷需求。低代码/零代码平台通过可视化拖拽、预置组件等方式，极大地缩短了应用交付周期。</p>
+<p>从行业分布来看，金融、制造、零售是目前低代码渗透率最高的三个领域。其中，制造企业主要利用低代码构建生产管理、供应链协同等边缘系统；金融机构则更多用于内部流程审批和营销活动页面的快速搭建。</p>
+<p>然而，市场在快速发展的同时也面临挑战。部分CIO表示，低代码平台在处理核心业务逻辑复杂、高并发场景时表现依然受限。此外，各厂商之间的技术标准不统一，导致“数据孤岛”问题在低代码生态中依然存在，这成为阻碍大型企业全面拥抱低代码的关键因素。</p>
+</div>
+</div>
+</div>
+<!-- Right Column: Metadata & Notes (40%) -->
+<div class="lg:col-span-5 space-y-6">
+<!-- AI Key Insights -->
+<div class="bg-surface-container-lowest rounded-lg border border-outline-variant overflow-hidden shadow-sm hover:shadow-md transition-shadow">
+<div class="bg-surface-container-low px-4 py-3 border-b border-outline-variant flex items-center gap-2">
+<span class="material-symbols-outlined text-primary">lightbulb</span>
+<h3 class="text-label-md font-label-md font-bold text-on-surface uppercase">AI 提取关键洞察</h3>
+</div>
+<ul class="p-4 space-y-3">
+<li class="flex items-start gap-3">
+<div class="w-6 h-6 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center flex-shrink-0 mt-0.5">
+<span class="text-xs font-bold">1</span>
+</div>
+<p class="text-body-md text-on-surface-variant"><strong class="text-on-surface">主要驱动力：</strong> 企业降本增效需求与IT人才结构性短缺双重叠加。</p>
+</li>
+<li class="flex items-start gap-3">
+<div class="w-6 h-6 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center flex-shrink-0 mt-0.5">
+<span class="text-xs font-bold">2</span>
+</div>
+<p class="text-body-md text-on-surface-variant"><strong class="text-on-surface">核心痛点：</strong> 复杂业务逻辑处理能力不足；厂商间生态割裂导致的数据孤岛。</p>
+</li>
+<li class="flex items-start gap-3">
+<div class="w-6 h-6 rounded-full bg-primary-container text-on-primary-container flex items-center justify-center flex-shrink-0 mt-0.5">
+<span class="text-xs font-bold">3</span>
+</div>
+<p class="text-body-md text-on-surface-variant"><strong class="text-on-surface">行业分布：</strong> 金融、制造、零售为主要落地场景，但应用层面偏向边缘系统或内部流程。</p>
+</li>
+</ul>
+</div>
+<!-- User Notes -->
+<div class="bg-surface-container-lowest rounded-lg border border-outline-variant overflow-hidden shadow-sm hover:shadow-md transition-shadow flex flex-col h-[300px]">
+<div class="bg-surface-container-low px-4 py-3 border-b border-outline-variant flex justify-between items-center">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-on-surface-variant">edit_note</span>
+<h3 class="text-label-md font-label-md font-bold text-on-surface uppercase">研究笔记</h3>
+</div>
+<span class="text-xs text-on-surface-variant">自动保存</span>
+</div>
+<div class="p-4 flex-1 flex flex-col">
+<textarea class="w-full h-full resize-none bg-transparent border-0 focus:ring-0 text-body-md text-on-surface placeholder-on-surface-variant/50 p-0" placeholder="在此记录针对该数据源的想法、分析或引用计划..."></textarea>
+</div>
+<div class="px-4 py-3 bg-surface-container-lowest border-t border-outline-variant flex justify-end">
+<button class="px-4 py-2 bg-transparent border border-outline-variant text-on-surface text-label-md font-label-md rounded-md hover:bg-surface-container-low transition-colors">
+                                添加到大纲
+                            </button>
+</div>
+</div>
+</div>
+</div>
+</main>
+</div>
+</body></html>
