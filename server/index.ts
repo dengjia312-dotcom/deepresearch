@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import { createHash } from 'node:crypto'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import {
   ApiProtectionStore,
@@ -89,9 +90,16 @@ async function startServer() {
   await runDatabaseMigrations()
   await recoverInterruptedStages()
   app.listen(port, '0.0.0.0', () => {
-    const { configured, model } = getMimoConfiguration()
+    const { apiKey, baseUrl, configured, model } = getMimoConfiguration()
     console.log(`[server] listening on 0.0.0.0:${port}`)
-    console.log(`[server] MiMo configured: ${configured}; model: ${model}`)
+    console.log('[server] AI config fingerprint', {
+      baseUrl,
+      model,
+      apiKeyConfigured: configured,
+      apiKeyFingerprint: apiKey
+        ? createHash('sha256').update(apiKey).digest('hex').slice(0, 8)
+        : null,
+    })
   })
 }
 
