@@ -259,6 +259,26 @@ function summarizeResearchResponseShape(payload: Record<string, unknown>) {
   }
 }
 
+function summarizeResearchRequestShape(
+  model: string,
+  body: Record<string, unknown>,
+) {
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const toolRecords = tools.filter(isRecord)
+  const webSearchTool = toolRecords.find((tool) => asString(tool.type) === 'web_search')
+  const thinking = isRecord(body.thinking) ? body.thinking : null
+
+  return {
+    model,
+    hasTools: tools.length > 0,
+    toolTypes: toolRecords.map((tool) => asString(tool.type)).filter(Boolean),
+    forceSearch: webSearchTool?.force_search === true,
+    toolChoice: asString(body.tool_choice) || null,
+    stream: typeof body.stream === 'boolean' ? body.stream : null,
+    thinkingType: thinking ? asString(thinking.type) || null : null,
+  }
+}
+
 export function parseJsonObject(content: string): unknown {
   const withoutFence = content
     .replace(/^```(?:json)?\s*/i, '')
@@ -398,6 +418,10 @@ export async function requestMimo(
       startedAt: new Date(startedAt).toISOString(),
       timeoutMs,
     })
+    console.info(
+      '[mimo:research] request shape',
+      summarizeResearchRequestShape(config.model, body),
+    )
   }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
@@ -515,6 +539,7 @@ export async function researchWithMimo(request: ResearchRequest): Promise<Resear
           limit: request.targetSourceCount,
         },
       ],
+      tool_choice: 'auto',
       max_completion_tokens: 4096,
       temperature: 0.2,
       stream: false,

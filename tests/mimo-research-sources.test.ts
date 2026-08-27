@@ -41,14 +41,24 @@ function officialAnnotation(url = 'https://example.com/research') {
   }
 }
 
-async function withMockedMimoResponse(payload: unknown, callback: () => Promise<void>) {
+async function withMockedMimoResponse(
+  payload: unknown,
+  callback: () => Promise<void>,
+  captureRequest?: (body: Record<string, unknown>) => void,
+) {
   const originalFetch = globalThis.fetch
   const originalApiKey = process.env.AI_API_KEY
   process.env.AI_API_KEY = 'test-api-key'
-  globalThis.fetch = async () => new Response(JSON.stringify(payload), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  })
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as unknown
+    if (captureRequest && body && typeof body === 'object' && !Array.isArray(body)) {
+      captureRequest(body as Record<string, unknown>)
+    }
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
 
   try {
     await callback()
@@ -58,6 +68,39 @@ async function withMockedMimoResponse(payload: unknown, callback: () => Promise<
     else process.env.AI_API_KEY = originalApiKey
   }
 }
+
+test('Research 实际请求显式启用 MiMo web_search tool choice', async () => {
+  let requestBody: Record<string, unknown> | null = null
+  const annotation = officialAnnotation()
+  await withMockedMimoResponse(completionPayload({
+    content: JSON.stringify({
+      summary: '研究摘要',
+      insights: [{
+        title: '研究洞察',
+        content: '洞察正文',
+        sourceUrls: [annotation.url],
+      }],
+      warnings: [],
+    }),
+    annotations: [annotation],
+  }), async () => {
+    await researchWithMimo(researchRequest)
+  }, (body) => {
+    requestBody = body
+  })
+
+  assert.ok(requestBody)
+  const tools = Array.isArray(requestBody.tools) ? requestBody.tools : []
+  const webSearch = tools.find((tool) => (
+    tool
+    && typeof tool === 'object'
+    && !Array.isArray(tool)
+    && (tool as Record<string, unknown>).type === 'web_search'
+  )) as Record<string, unknown> | undefined
+  assert.ok(webSearch)
+  assert.equal(webSearch.force_search, true)
+  assert.equal(requestBody.tool_choice, 'auto')
+})
 
 test('官方 message.annotations url_citation 格式可提取来源', () => {
   const result = extractVerifiedSearchMetadata(completionPayload({
