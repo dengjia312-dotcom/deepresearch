@@ -18,6 +18,7 @@ import { sessionOwnerMiddleware } from './middleware/sessionOwner'
 import { runDatabaseMigrations } from './db/migrate'
 import { recoverInterruptedStages } from './db/repositories/taskRepository'
 import { closeDatabasePool } from './db/pool'
+import { startMimoWebSearchStartupDiagnostic } from './services/mimoWebSearchStartupDiagnostic'
 
 const app = express()
 const port = Number.parseInt(process.env.PORT ?? '3001', 10) || 3001
@@ -100,6 +101,7 @@ async function startServer() {
         ? createHash('sha256').update(apiKey).digest('hex').slice(0, 8)
         : null,
     })
+    void startMimoWebSearchStartupDiagnostic()
   })
 }
 
