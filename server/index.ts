@@ -88,9 +88,9 @@ app.use(
 async function startServer() {
   await runDatabaseMigrations()
   await recoverInterruptedStages()
-  app.listen(port, '127.0.0.1', () => {
+  app.listen(port, '0.0.0.0', () => {
     const { configured, model } = getMimoConfiguration()
-    console.log(`[server] listening on http://127.0.0.1:${port}`)
+    console.log(`[server] listening on 0.0.0.0:${port}`)
     console.log(`[server] MiMo configured: ${configured}; model: ${model}`)
   })
 }
