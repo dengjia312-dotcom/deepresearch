@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type {
   MimoChatCompletionResponse,
   ResearchErrorCode,
@@ -262,6 +263,7 @@ function summarizeResearchResponseShape(payload: Record<string, unknown>) {
 function summarizeResearchRequestShape(
   model: string,
   body: Record<string, unknown>,
+  bodyFingerprint: string,
 ) {
   const tools = Array.isArray(body.tools) ? body.tools : []
   const toolRecords = tools.filter(isRecord)
@@ -276,6 +278,7 @@ function summarizeResearchRequestShape(
     toolChoice: asString(body.tool_choice) || null,
     stream: typeof body.stream === 'boolean' ? body.stream : null,
     thinkingType: thinking ? asString(thinking.type) || null : null,
+    bodyFingerprint,
   }
 }
 
@@ -412,6 +415,11 @@ export async function requestMimo(
 
   const startedAt = Date.now()
   const timeoutMs = options.timeoutMs ?? getDefaultRequestTimeoutMs()
+  const serializedBody = JSON.stringify({ model: config.model, ...body })
+  const bodyFingerprint = createHash('sha256')
+    .update(serializedBody)
+    .digest('hex')
+    .slice(0, 12)
   let upstreamHttpStatus: number | null = null
   if (options.operation === 'research') {
     console.info('[mimo:research] request started', {
@@ -420,7 +428,7 @@ export async function requestMimo(
     })
     console.info(
       '[mimo:research] request shape',
-      summarizeResearchRequestShape(config.model, body),
+      summarizeResearchRequestShape(config.model, body, bodyFingerprint),
     )
   }
   const controller = new AbortController()
@@ -432,7 +440,7 @@ export async function requestMimo(
         'Content-Type': 'application/json',
         'api-key': config.apiKey,
       },
-      body: JSON.stringify({ model: config.model, ...body }),
+      body: serializedBody,
       signal: controller.signal,
     })
     upstreamHttpStatus = response.status
@@ -519,32 +527,36 @@ export async function testMimoConnection() {
   return { model: payload.model ?? getMimoConfiguration().model, content: getAssistantContent(payload) }
 }
 
-export async function researchWithMimo(request: ResearchRequest): Promise<ResearchResponse> {
+export function buildMimoResearchRequestBody(request: ResearchRequest) {
   const prompt = `请针对“${request.topic}”执行真实互联网检索并完成中文研究。\n研究目标：${request.goal}\n来源偏好：${request.sourcePreferences.join('、') || '官方网站、研究报告、学术论文、行业媒体'}\n目标检索数量：${request.targetSourceCount} 条\n\n要求：\n1. 尽量返回接近目标数量且互不重复的有效来源，优先官方机构、政府、论文、研究机构和主流媒体；\n2. 不得编造来源标题或 URL；无法确认的内容必须明确标记；\n3. 每条关键洞察必须列出支持它的真实来源 URL；\n4. 仅输出 JSON，不要 Markdown，结构为：\n{"summary":"研究摘要","insights":[{"title":"洞察标题","content":"洞察正文","sourceUrls":["搜索结果中的真实URL"]}],"warnings":[]}`
 
+  return {
+    messages: [
+      {
+        role: 'system',
+        content: '你是严谨的中文行业研究员。只能引用联网搜索实际返回的来源，不得补写或猜测 URL。',
+      },
+      { role: 'user', content: prompt },
+    ],
+    tools: [
+      {
+        type: 'web_search',
+        max_keyword: Math.min(8, Math.max(4, Math.ceil(request.targetSourceCount / 4))),
+        force_search: true,
+        limit: request.targetSourceCount,
+      },
+    ],
+    tool_choice: 'auto',
+    max_completion_tokens: 4096,
+    temperature: 0.2,
+    stream: false,
+    thinking: { type: 'disabled' },
+  }
+}
+
+export async function researchWithMimo(request: ResearchRequest): Promise<ResearchResponse> {
   const payload = await requestMimo(
-    {
-      messages: [
-        {
-          role: 'system',
-          content: '你是严谨的中文行业研究员。只能引用联网搜索实际返回的来源，不得补写或猜测 URL。',
-        },
-        { role: 'user', content: prompt },
-      ],
-      tools: [
-        {
-          type: 'web_search',
-          max_keyword: Math.min(8, Math.max(4, Math.ceil(request.targetSourceCount / 4))),
-          force_search: true,
-          limit: request.targetSourceCount,
-        },
-      ],
-      tool_choice: 'auto',
-      max_completion_tokens: 4096,
-      temperature: 0.2,
-      stream: false,
-      thinking: { type: 'disabled' },
-    },
+    buildMimoResearchRequestBody(request),
     { timeoutMs: getResearchRequestTimeoutMs(), operation: 'research' },
   )
 

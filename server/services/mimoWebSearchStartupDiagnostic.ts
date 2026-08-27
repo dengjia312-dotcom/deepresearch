@@ -1,4 +1,12 @@
-import { getMimoConfiguration, isRecord } from './mimoResearchService'
+import { createHash, randomUUID } from 'node:crypto'
+import {
+  buildMimoResearchRequestBody,
+  getMimoConfiguration,
+  isRecord,
+  MimoServiceError,
+  researchWithMimo,
+} from './mimoResearchService'
+import type { ResearchRequest } from '../types/research'
 
 const DIAGNOSTIC_TIMEOUT_MS = 120_000
 
@@ -10,10 +18,29 @@ interface DiagnosticLogger {
 interface DiagnosticDependencies {
   environment?: Record<string, string | undefined>
   fetchImpl?: typeof fetch
+  buildResearchBody?: typeof buildMimoResearchRequestBody
   getConfiguration?: typeof getMimoConfiguration
   logger?: DiagnosticLogger
   now?: () => number
+  runResearch?: typeof researchWithMimo
   timeoutMs?: number
+}
+
+type ResolvedDiagnosticDependencies = Required<Omit<DiagnosticDependencies, 'environment'>>
+
+const productionResearchRequest: ResearchRequest = {
+  topic: 'C端产品经理基础',
+  goal: '系统性地梳理C端产品经理的核心能力模型、工作流程、关键决策点及行业最佳实践，构建一个适用于中国互联网环境的、可落地的C端产品经理基础能力框架与知识体系。',
+  sourcePreferences: [
+    '权威报告',
+    '行业研究',
+    '企业案例',
+    '专业媒体',
+    '用户研究',
+  ],
+  targetSourceCount: 12,
+  taskId: '',
+  requestId: '',
 }
 
 function getFirstChoice(payload: Record<string, unknown>) {
@@ -28,17 +55,17 @@ function getErrorCode(payload: unknown, httpStatus: number) {
     : `HTTP_${httpStatus}`
 }
 
-async function runDiagnostic({
+async function runMinimalDiagnostic({
   fetchImpl,
   getConfiguration,
   logger,
   now,
   timeoutMs,
-}: Required<Omit<DiagnosticDependencies, 'environment'>>) {
+}: ResolvedDiagnosticDependencies) {
   const startedAt = now()
   const config = getConfiguration()
   if (!config.configured) {
-    logger.error('[diagnostic:web-search] failed', {
+    logger.error('[diagnostic:web-search:minimal] failed', {
       httpStatus: null,
       errorCode: 'MIMO_NOT_CONFIGURED',
       durationMs: now() - startedAt,
@@ -82,7 +109,7 @@ async function runDiagnostic({
     try {
       payload = await response.json()
     } catch {
-      logger.error('[diagnostic:web-search] failed', {
+      logger.error('[diagnostic:web-search:minimal] failed', {
         httpStatus,
         errorCode: 'MIMO_RESPONSE_INVALID',
         durationMs: now() - startedAt,
@@ -91,7 +118,7 @@ async function runDiagnostic({
     }
 
     if (!response.ok) {
-      logger.error('[diagnostic:web-search] failed', {
+      logger.error('[diagnostic:web-search:minimal] failed', {
         httpStatus,
         errorCode: getErrorCode(payload, response.status),
         durationMs: now() - startedAt,
@@ -99,7 +126,7 @@ async function runDiagnostic({
       return
     }
     if (!isRecord(payload)) {
-      logger.error('[diagnostic:web-search] failed', {
+      logger.error('[diagnostic:web-search:minimal] failed', {
         httpStatus,
         errorCode: 'MIMO_RESPONSE_INVALID',
         durationMs: now() - startedAt,
@@ -122,7 +149,7 @@ async function runDiagnostic({
       ? usage.web_search_usage
       : null
 
-    logger.info('[diagnostic:web-search] result', {
+    logger.info('[diagnostic:web-search:minimal] result', {
       httpStatus,
       annotationCount: annotations.length,
       annotationTypes,
@@ -141,7 +168,7 @@ async function runDiagnostic({
   } catch (error) {
     const timedOut = error instanceof Error
       && (error.name === 'AbortError' || error.name === 'TimeoutError')
-    logger.error('[diagnostic:web-search] failed', {
+    logger.error('[diagnostic:web-search:minimal] failed', {
       httpStatus,
       errorCode: timedOut ? 'MIMO_TIMEOUT' : 'MIMO_NETWORK_ERROR',
       durationMs: now() - startedAt,
@@ -151,21 +178,80 @@ async function runDiagnostic({
   }
 }
 
+async function runProductionDiagnostic({
+  buildResearchBody,
+  getConfiguration,
+  logger,
+  now,
+  runResearch,
+}: ResolvedDiagnosticDependencies) {
+  const startedAt = now()
+  const request = {
+    ...productionResearchRequest,
+    sourcePreferences: [...productionResearchRequest.sourcePreferences],
+    taskId: randomUUID(),
+    requestId: randomUUID(),
+  }
+  const config = getConfiguration()
+  const bodyFingerprint = createHash('sha256')
+    .update(JSON.stringify({ model: config.model, ...buildResearchBody(request) }))
+    .digest('hex')
+    .slice(0, 12)
+
+  try {
+    const result = await runResearch(request)
+    logger.info('[diagnostic:web-search:production] result', {
+      success: true,
+      actualSourceCount: result.actualSourceCount,
+      deduplicatedSourceCount: result.deduplicatedSourceCount,
+      finalSourceCount: result.sources.length,
+      durationMs: now() - startedAt,
+      errorCode: null,
+      bodyFingerprint,
+    })
+  } catch (error) {
+    logger.error('[diagnostic:web-search:production] result', {
+      success: false,
+      actualSourceCount: null,
+      deduplicatedSourceCount: null,
+      finalSourceCount: 0,
+      durationMs: now() - startedAt,
+      errorCode: error instanceof MimoServiceError ? error.code : 'INTERNAL_ERROR',
+      bodyFingerprint,
+    })
+  }
+}
+
+async function runDiagnostic(dependencies: ResolvedDiagnosticDependencies) {
+  await runMinimalDiagnostic(dependencies)
+  await runProductionDiagnostic(dependencies)
+}
+
 export function createMimoWebSearchStartupDiagnosticRunner(
   dependencies: DiagnosticDependencies = {},
 ) {
   const environment = dependencies.environment ?? process.env
   const fetchImpl = dependencies.fetchImpl ?? globalThis.fetch
+  const buildResearchBody = dependencies.buildResearchBody ?? buildMimoResearchRequestBody
   const getConfiguration = dependencies.getConfiguration ?? getMimoConfiguration
   const logger = dependencies.logger ?? console
   const now = dependencies.now ?? Date.now
+  const runResearch = dependencies.runResearch ?? researchWithMimo
   const timeoutMs = dependencies.timeoutMs ?? DIAGNOSTIC_TIMEOUT_MS
   let started = false
 
   return () => {
     if (environment.AI_WEB_SEARCH_STARTUP_DIAGNOSTIC !== 'true' || started) return null
     started = true
-    return runDiagnostic({ fetchImpl, getConfiguration, logger, now, timeoutMs })
+    return runDiagnostic({
+      buildResearchBody,
+      fetchImpl,
+      getConfiguration,
+      logger,
+      now,
+      runResearch,
+      timeoutMs,
+    })
   }
 }
 
