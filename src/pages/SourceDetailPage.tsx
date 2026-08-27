@@ -11,7 +11,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { PrototypeDataNotice } from '../components/PrototypeDataNotice'
 import { SourceDetailPanel } from '../components/SourceDetailPanel'
 import { StatusBadge } from '../components/StatusBadge'
-import { useResearch } from '../context/ResearchContext'
+import { getTaskRoute, useResearch } from '../context/ResearchContext'
 import type { ReviewStatus } from '../types'
 
 const reviewActions: Array<{
@@ -29,18 +29,27 @@ export function SourceDetailPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const {
+    state,
     getSource,
     getPoolItem,
-    currentTopic,
     addSourceToPool,
     setReviewStatus,
     updateNote,
   } = useResearch()
   const source = getSource(sourceId)
   const poolItem = getPoolItem(sourceId)
-  const fromSearch = (location.state as { from?: string } | null)?.from === '/search'
-  const backPath = fromSearch ? '/search' : '/pool'
-  const backLabel = fromSearch ? '返回 AI 搜索' : '返回资料池'
+  const sourceRoute = (location.state as { from?: string } | null)?.from
+  const currentTaskPrefix = `/tasks/${encodeURIComponent(state.task.id)}/`
+  const backPath = sourceRoute?.startsWith(currentTaskPrefix)
+    ? sourceRoute
+    : getTaskRoute(state.task.id, 'pool')
+  const backLabel = sourceRoute?.endsWith('/search')
+    ? '返回 AI 搜索'
+    : sourceRoute?.endsWith('/report')
+      ? '返回研究报告'
+      : sourceRoute?.endsWith('/outline')
+        ? '返回研究大纲'
+      : '返回资料池'
 
   if (!source) {
     return (
@@ -48,7 +57,7 @@ export function SourceDetailPage() {
         <div className="surface-card max-w-md p-8 text-center">
           <FileText size={30} className="mx-auto text-slate-300" />
           <h1 className="mt-3 text-lg font-semibold text-ink">未找到该来源</h1>
-          <button type="button" onClick={() => navigate('/search')} className="btn-primary mt-5">
+          <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'search'))} className="btn-primary mt-5">
             返回 AI 搜索
           </button>
         </div>
@@ -67,8 +76,8 @@ export function SourceDetailPage() {
         {backLabel}
       </button>
 
-      {currentTopic.usesPrototypeData && (
-        <PrototypeDataNotice topic={currentTopic.topic} className="mb-5" />
+      {source.origin === 'mock' && (
+        <PrototypeDataNotice topic={source.title} className="mb-5" />
       )}
 
       <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.65fr)]">
@@ -152,7 +161,7 @@ export function SourceDetailPage() {
               className="min-h-[220px] w-full resize-none bg-white p-5 text-sm leading-[22px] text-ink outline-none placeholder:text-slate-400 disabled:bg-slate-50"
             />
             <div className="border-t border-outline bg-slate-50 px-5 py-3 text-right">
-              <button type="button" onClick={() => navigate('/pool')} className="btn-secondary">
+              <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'pool'))} className="btn-secondary">
                 返回资料池
               </button>
             </div>

@@ -22,7 +22,7 @@ export function OutlineSection({
   return (
     <div className={level > 0 ? 'ml-5 border-l border-slate-200 pl-3' : ''}>
       <div
-        className={`group flex items-center gap-2 rounded-lg border px-3 py-2.5 transition ${
+        className={`group flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2.5 transition ${
           selected
             ? 'border-blue-200 bg-blue-50 text-primary-deep'
             : 'border-transparent text-ink hover:border-slate-200 hover:bg-slate-50'
@@ -61,6 +61,27 @@ export function OutlineSection({
           <Link2 size={11} />
           {section.sourceIds.length}
         </span>
+        {section.evidenceStatus && (
+          <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${
+            section.evidenceStatus === 'sufficient'
+              ? 'bg-emerald-50 text-emerald-700'
+              : section.evidenceStatus === 'limited'
+                ? 'bg-amber-50 text-amber-700'
+                : 'bg-rose-50 text-rose-700'
+          }`}>
+            {section.evidenceStatus === 'sufficient'
+              ? '证据较充分'
+              : section.evidenceStatus === 'limited'
+                ? '证据有限'
+                : '证据不足'}
+          </span>
+        )}
+        {section.description && (
+          <p className="ml-8 w-full text-xs leading-5 text-ink-muted">{section.description}</p>
+        )}
+        {section.evidenceStatus === 'insufficient' && (
+          <p className="ml-8 w-full text-xs font-medium text-rose-700">当前章节证据不足</p>
+        )}
       </div>
 
       {hasChildren && expanded && (

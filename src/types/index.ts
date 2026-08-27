@@ -1,4 +1,6 @@
 export type ResearchDepth = 'quick' | 'deep' | 'professional'
+export type SearchDepth = 'concise' | 'standard' | 'deep' | 'custom'
+export type ReportDepth = 'brief' | 'standard' | 'deep'
 
 export type SourcePreference =
   | '权威报告'
@@ -25,7 +27,16 @@ export type TaskStatus =
 
 export type SourceKind = 'web' | 'pdf' | 'news' | 'report' | 'internal'
 
-export type Credibility = 'high' | 'medium' | 'low'
+export type Credibility = 'high' | 'medium' | 'low' | 'unverified'
+
+export type DataSource = 'real' | 'mock'
+export type SearchMode = 'idle' | DataSource
+
+export type SearchStatus = 'idle' | 'loading' | 'success' | 'error'
+export type GenerationMode = 'idle' | DataSource
+export type GenerationStatus = 'idle' | 'loading' | 'success' | 'error'
+export type EvidenceStatus = 'sufficient' | 'limited' | 'insufficient'
+export type ClaimType = 'source_supported' | 'synthesis' | 'uncertain'
 
 export type ReviewStatus =
   | 'unreviewed'
@@ -39,7 +50,13 @@ export interface ResearchTask {
   query: string
   topicId: string
   usesPrototypeData: boolean
+  dataSource: 'real'
   depth: ResearchDepth
+  searchDepth: SearchDepth
+  targetSourceCount: number
+  reportDepth: ReportDepth
+  reportTargetMinWords: number
+  reportTargetMaxWords: number
   status: TaskStatus
   createdAt: string
 }
@@ -57,6 +74,7 @@ export interface ResearchPlan {
   estimatedSourceCount: number
   estimatedDurationMinutes: number
   usesPrototypeData: boolean
+  dataSource: DataSource
   updatedAt: string
   confirmedAt: string | null
 }
@@ -77,6 +95,8 @@ export interface Source {
   addedToPool: boolean
   excerpt: string[]
   insights: string[]
+  origin?: DataSource
+  sourceTypeLabel?: string
 }
 
 export interface ResearchInsight {
@@ -91,6 +111,30 @@ export interface ResearchPoolItem {
   reviewStatus: ReviewStatus
   note: string
   addedAt: string
+  sourceSnapshot?: Source
+  dataSource: DataSource
+}
+
+export interface LiveResearchInsightData {
+  id: string
+  title: string
+  content: string
+  sourceIds: string[]
+}
+
+export interface LiveResearchResult {
+  mode: 'live'
+  dataSource: 'real'
+  topic: string
+  summary: string
+  insights: LiveResearchInsightData[]
+  sources: Source[]
+  warnings: string[]
+  targetSourceCount: number
+  actualSourceCount: number
+  deduplicatedSourceCount: number
+  validSourceCount: number
+  searchedAt: string
 }
 
 export interface OutlineSectionData {
@@ -98,6 +142,50 @@ export interface OutlineSectionData {
   title: string
   sourceIds: string[]
   children: OutlineSectionData[]
+  description?: string
+  evidenceStatus?: EvidenceStatus
+}
+
+export interface LiveOutlineResult {
+  mode: 'live'
+  dataSource: 'real'
+  outline: {
+    title: string
+    sections: OutlineSectionData[]
+  }
+  warnings: string[]
+  generatedAt: string
+}
+
+export interface LiveReportParagraphData {
+  id: string
+  content: string
+  sourceIds: string[]
+  claimType: ClaimType
+}
+
+export interface LiveReportSectionData {
+  id: string
+  title: string
+  paragraphs: LiveReportParagraphData[]
+}
+
+export interface LiveReportResult {
+  mode: 'live'
+  dataSource: 'real'
+  report: {
+    title: string
+    executiveSummary: string
+    sections: LiveReportSectionData[]
+    conclusion: string
+    limitations: string[]
+  }
+  warnings: string[]
+  reportDepth: ReportDepth
+  targetMinWords: number
+  targetMaxWords: number
+  actualWordCount: number
+  generatedAt: string
 }
 
 export type ReportSegment =

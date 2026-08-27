@@ -16,9 +16,9 @@ export function PrototypeDataNotice({
     >
       <FlaskConical size={17} className="mt-0.5 shrink-0 text-amber-600" />
       <div>
-        <p className="text-sm font-semibold">当前为产品原型演示数据</p>
+        <p className="text-sm font-semibold">当前为用户主动选择的演示数据</p>
         <p className="mt-0.5 text-xs leading-5 text-amber-800">
-          尚未匹配“{topic}”的预设数据集，当前内容由前端动态占位生成，不代表真实搜索或研究结论。
+          “{topic}”当前内容来自前端演示数据，不代表真实接口结果、真实来源或正式研究结论。
         </p>
       </div>
     </div>

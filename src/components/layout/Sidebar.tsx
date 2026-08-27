@@ -11,7 +11,11 @@ import {
   Database,
 } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
-import { useResearch } from '../../context/ResearchContext'
+import {
+  getTaskRoute,
+  type ResearchTaskPage,
+  useResearch,
+} from '../../context/ResearchContext'
 
 interface SidebarProps {
   open: boolean
@@ -19,32 +23,30 @@ interface SidebarProps {
 }
 
 const navigation = [
-  { label: 'AI 搜索', path: '/search', icon: Search },
-  { label: '资料池', path: '/pool', icon: Database },
-  { label: '研究大纲', path: '/outline', icon: ListTree },
-  { label: '研究报告', path: '/report', icon: FileText },
-]
+  { label: 'AI 搜索', page: 'search', icon: Search },
+  { label: '资料池', page: 'pool', icon: Database },
+  { label: '研究大纲', page: 'outline', icon: ListTree },
+  { label: '研究报告', page: 'report', icon: FileText },
+] satisfies Array<{ label: string; page: ResearchTaskPage; icon: typeof Search }>
 
-function isNavigationActive(pathname: string, path: string) {
-  if (path === '/search') {
-    return pathname === '/'
-      || pathname.startsWith('/plan')
-      || pathname.startsWith('/search')
+function isNavigationActive(pathname: string, page: ResearchTaskPage) {
+  if (page === 'search') {
+    return pathname.endsWith('/plan') || pathname.endsWith('/search')
   }
-  if (path === '/pool') {
-    return pathname.startsWith('/pool') || pathname.startsWith('/sources/')
+  if (page === 'pool') {
+    return pathname.endsWith('/pool') || pathname.includes('/sources/')
   }
-  return pathname.startsWith(path)
+  return pathname.endsWith(`/${page}`)
 }
 
 export function Sidebar({ open, onClose }: SidebarProps) {
   const location = useLocation()
-  const { state } = useResearch()
+  const { activeTaskId, state } = useResearch()
   const aiSearchPath = !state.researchPlan
     ? '/'
     : state.researchPlan.confirmedAt
-      ? '/search'
-      : '/plan'
+      ? activeTaskId ? getTaskRoute(activeTaskId, 'search') : '/'
+      : activeTaskId ? getTaskRoute(activeTaskId, 'plan') : '/'
 
   return (
     <>
@@ -97,11 +99,16 @@ export function Sidebar({ open, onClose }: SidebarProps) {
         <nav className="mt-6 space-y-1.5" aria-label="主要导航">
           {navigation.map((item) => {
             const Icon = item.icon
-            const active = isNavigationActive(location.pathname, item.path)
+            const active = isNavigationActive(location.pathname, item.page)
+            const path = activeTaskId
+              ? item.page === 'search'
+                ? aiSearchPath
+                : getTaskRoute(activeTaskId, item.page)
+              : '/'
             return (
               <Link
-                key={item.path}
-                to={item.path === '/search' ? aiSearchPath : item.path}
+                key={item.page}
+                to={path}
                 onClick={onClose}
                 className={`focus-ring relative flex h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium transition ${
                   active
@@ -114,7 +121,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
                 )}
                 <Icon size={18} strokeWidth={active ? 2.3 : 1.8} />
                 {item.label}
-                {item.path === '/pool' && (
+                {item.page === 'pool' && (
                   <span className="ml-auto h-1.5 w-1.5 rounded-full bg-emerald-500" />
                 )}
               </Link>

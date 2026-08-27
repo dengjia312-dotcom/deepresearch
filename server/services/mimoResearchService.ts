@@ -1,0 +1,484 @@
+import type {
+  MimoChatCompletionResponse,
+  ResearchErrorCode,
+  ResearchInsight,
+  ResearchRequest,
+  ResearchResponse,
+  ResearchSource,
+  VerifiedSearchMetadata,
+} from '../types/research'
+import {
+  getAiConcurrencyRetryAfterSeconds,
+  tryAcquireGlobalAiSlot,
+} from './aiConcurrency'
+
+const DEFAULT_BASE_URL = 'https://api.xiaomimimo.com/v1'
+const DEFAULT_MODEL = 'mimo-v2.5'
+const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
+const DEFAULT_RESEARCH_REQUEST_TIMEOUT_MS = 120_000
+
+interface MimoRequestOptions {
+  timeoutMs?: number
+  operation?: 'research'
+}
+
+interface MimoConfiguration {
+  apiKey: string
+  baseUrl: string
+  model: string
+  configured: boolean
+}
+
+interface ModelInsight {
+  title: string
+  content: string
+  sourceUrls: string[]
+}
+
+interface ModelResearchPayload {
+  summary: string
+  insights: ModelInsight[]
+  warnings: string[]
+}
+
+function getPositiveIntegerEnvironmentValue(
+  primaryName: string,
+  legacyName: string,
+  fallback: number,
+) {
+  const configured = Number(
+    process.env[primaryName]?.trim()
+    || process.env[legacyName]?.trim(),
+  )
+  return Number.isInteger(configured) && configured > 0
+    ? configured
+    : fallback
+}
+
+function getDefaultRequestTimeoutMs() {
+  return getPositiveIntegerEnvironmentValue(
+    'AI_DEFAULT_TIMEOUT_MS',
+    'MIMO_DEFAULT_TIMEOUT_MS',
+    DEFAULT_REQUEST_TIMEOUT_MS,
+  )
+}
+
+function getResearchRequestTimeoutMs() {
+  return getPositiveIntegerEnvironmentValue(
+    'AI_RESEARCH_TIMEOUT_MS',
+    'MIMO_RESEARCH_TIMEOUT_MS',
+    DEFAULT_RESEARCH_REQUEST_TIMEOUT_MS,
+  )
+}
+
+export class MimoServiceError extends Error {
+  constructor(
+    public readonly code: ResearchErrorCode,
+    public readonly statusCode: number,
+    public readonly publicMessage: string,
+    public readonly retryAfterSeconds?: number,
+  ) {
+    super(publicMessage)
+    this.name = 'MimoServiceError'
+  }
+}
+
+export function getMimoConfiguration(): MimoConfiguration {
+  const apiKey = process.env.AI_API_KEY?.trim()
+    || process.env.MIMO_API_KEY?.trim()
+    || ''
+  const baseUrl = (
+    process.env.AI_BASE_URL?.trim()
+    || process.env.MIMO_BASE_URL?.trim()
+    || DEFAULT_BASE_URL
+  ).replace(/\/$/, '')
+  const model = process.env.AI_MODEL?.trim()
+    || process.env.MIMO_MODEL?.trim()
+    || DEFAULT_MODEL
+  return { apiKey, baseUrl, model, configured: Boolean(apiKey) }
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+export function asString(value: unknown) {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function normalizeUrl(value: string) {
+  try {
+    const url = new URL(value)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = asString(record[key])
+    if (value) return value
+  }
+  return ''
+}
+
+function extractVerifiedSearchMetadata(payload: unknown) {
+  const candidates: VerifiedSearchMetadata[] = []
+  const visited = new Set<unknown>()
+
+  const visit = (value: unknown) => {
+    if (!value || typeof value !== 'object' || visited.has(value)) return
+    visited.add(value)
+
+    if (Array.isArray(value)) {
+      value.forEach(visit)
+      return
+    }
+
+    const record = value as Record<string, unknown>
+    const rawUrl = firstString(record, ['url', 'page_url', 'link'])
+    const url = rawUrl ? normalizeUrl(rawUrl) : null
+    if (url) {
+      const parsedUrl = new URL(url)
+      const title = firstString(record, ['title', 'name', 'page_title'])
+      const publisher = firstString(record, ['site_name', 'publisher', 'source_name'])
+      const snippet = firstString(record, ['snippet', 'summary', 'description', 'text', 'content'])
+      const publishedAt = firstString(record, ['publish_time', 'published_at', 'publishedAt', 'date'])
+
+      if (title || publisher || snippet) {
+        candidates.push({
+          url,
+          title: title || parsedUrl.hostname,
+          publisher: publisher || parsedUrl.hostname,
+          publishedAt,
+          snippet,
+        })
+      }
+    }
+
+    Object.entries(record).forEach(([key, child]) => {
+      if (key === 'content' && typeof child === 'string') return
+      if (/logo|icon|avatar/i.test(key)) return
+      visit(child)
+    })
+  }
+
+  visit(payload)
+
+  const unique = new Map<string, VerifiedSearchMetadata>()
+  candidates.forEach((candidate) => {
+    const key = normalizeUrl(candidate.url)
+    if (key && !unique.has(key)) unique.set(key, candidate)
+  })
+  return {
+    actualSourceCount: candidates.length,
+    deduplicatedMetadata: [...unique.values()],
+  }
+}
+
+export function parseJsonObject(content: string): unknown {
+  const withoutFence = content
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim()
+  const firstBrace = withoutFence.indexOf('{')
+  const lastBrace = withoutFence.lastIndexOf('}')
+  if (firstBrace < 0 || lastBrace <= firstBrace) {
+    throw new MimoServiceError(
+      'MIMO_RESPONSE_INVALID',
+      502,
+      'MiMo 返回了无法解析的研究结果。',
+    )
+  }
+
+  try {
+    return JSON.parse(withoutFence.slice(firstBrace, lastBrace + 1)) as unknown
+  } catch {
+    throw new MimoServiceError(
+      'MIMO_RESPONSE_INVALID',
+      502,
+      'MiMo 返回了格式异常的研究结果。',
+    )
+  }
+}
+
+function parseModelResearchPayload(content: string): ModelResearchPayload {
+  const parsed = parseJsonObject(content)
+  if (!isRecord(parsed)) {
+    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的研究结果结构无效。')
+  }
+
+  const summary = asString(parsed.summary)
+  const rawInsights = Array.isArray(parsed.insights) ? parsed.insights : []
+  const insights = rawInsights.flatMap<ModelInsight>((item) => {
+    if (!isRecord(item)) return []
+    const title = asString(item.title)
+    const insightContent = asString(item.content)
+    const sourceUrls = Array.isArray(item.sourceUrls)
+      ? item.sourceUrls.map(asString).filter(Boolean)
+      : []
+    return title && insightContent ? [{ title, content: insightContent, sourceUrls }] : []
+  })
+  const warnings = Array.isArray(parsed.warnings)
+    ? parsed.warnings.map(asString).filter(Boolean)
+    : []
+
+  if (!summary || insights.length === 0) {
+    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的研究摘要或洞察不完整。')
+  }
+  return { summary, insights, warnings }
+}
+
+function classifySource(metadata: VerifiedSearchMetadata) {
+  const host = new URL(metadata.url).hostname.toLowerCase()
+  const publisher = metadata.publisher.toLowerCase()
+  if (host.endsWith('.gov.cn') || host.includes('.gov.')) return '官方网站'
+  if (host.endsWith('.edu.cn') || host.includes('arxiv.org') || publisher.includes('大学')) {
+    return '学术论文'
+  }
+  if (/研究|研究院|报告|协会|机构/.test(metadata.publisher)) return '研究报告'
+  return '行业媒体'
+}
+
+function buildResearchSources(metadata: VerifiedSearchMetadata[]): ResearchSource[] {
+  return metadata.map((item, index) => {
+    const fallback = '该来源由 MiMo 联网搜索返回，请打开原文核验详细内容。'
+    const summary = item.snippet || fallback
+    return {
+      id: `source-${index + 1}`,
+      title: item.title,
+      url: item.url,
+      publisher: item.publisher,
+      publishedAt: item.publishedAt,
+      type: classifySource(item),
+      credibility: '待评估',
+      summary,
+      keyInsight: summary,
+    }
+  })
+}
+
+function buildResearchInsights(
+  modelInsights: ModelInsight[],
+  sources: ResearchSource[],
+): { insights: ResearchInsight[]; hasUnlinkedInsight: boolean } {
+  const sourceIdByUrl = new Map(
+    sources.flatMap((source) => {
+      const url = normalizeUrl(source.url)
+      return url ? [[url, source.id] as const] : []
+    }),
+  )
+  let hasUnlinkedInsight = false
+
+  const insights = modelInsights.map((insight, index) => {
+    const sourceIds = [...new Set(insight.sourceUrls.flatMap((rawUrl) => {
+      const url = normalizeUrl(rawUrl)
+      const sourceId = url ? sourceIdByUrl.get(url) : undefined
+      return sourceId ? [sourceId] : []
+    }))]
+    if (sourceIds.length === 0) hasUnlinkedInsight = true
+    return {
+      id: `insight-${index + 1}`,
+      title: insight.title,
+      content: insight.content,
+      sourceIds,
+    }
+  })
+
+  return { insights, hasUnlinkedInsight }
+}
+
+export async function requestMimo(
+  body: Record<string, unknown>,
+  options: MimoRequestOptions = {},
+): Promise<MimoChatCompletionResponse> {
+  const config = getMimoConfiguration()
+  if (!config.configured) {
+    throw new MimoServiceError('MIMO_NOT_CONFIGURED', 503, 'MiMo API 尚未配置。')
+  }
+
+  const releaseAiSlot = tryAcquireGlobalAiSlot()
+  if (!releaseAiSlot) {
+    throw new MimoServiceError(
+      'API_CONCURRENCY_LIMITED',
+      503,
+      '当前 AI 服务请求较多，请稍后手动重试。',
+      getAiConcurrencyRetryAfterSeconds(),
+    )
+  }
+
+  const startedAt = Date.now()
+  const timeoutMs = options.timeoutMs ?? getDefaultRequestTimeoutMs()
+  let upstreamHttpStatus: number | null = null
+  if (options.operation === 'research') {
+    console.info('[mimo:research] request started', {
+      startedAt: new Date(startedAt).toISOString(),
+      timeoutMs,
+    })
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': config.apiKey,
+      },
+      body: JSON.stringify({ model: config.model, ...body }),
+      signal: controller.signal,
+    })
+    upstreamHttpStatus = response.status
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        throw new MimoServiceError('MIMO_AUTH_FAILED', 502, 'MiMo API 鉴权失败。')
+      }
+      if (response.status === 429) {
+        throw new MimoServiceError(
+          'MIMO_RATE_LIMITED',
+          503,
+          'MiMo API 请求过于频繁或套餐额度已耗尽，请稍后重试或检查额度。',
+        )
+      }
+      if (response.status === 402) {
+        throw new MimoServiceError('MIMO_QUOTA_EXCEEDED', 503, 'MiMo API 账户余额不足。')
+      }
+      if (response.status === 403) {
+        throw new MimoServiceError(
+          'MIMO_ACCESS_DENIED',
+          502,
+          'MiMo API 拒绝访问，请检查地区、风控状态或服务开通情况。',
+        )
+      }
+      throw new MimoServiceError('MIMO_UPSTREAM_ERROR', 502, `MiMo API 请求失败（${response.status}）。`)
+    }
+
+    const payload = await response.json() as unknown
+    if (!isRecord(payload)) {
+      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo API 返回格式异常。')
+    }
+    if (options.operation === 'research') {
+      console.info('[mimo:research] request succeeded', {
+        durationMs: Date.now() - startedAt,
+        upstreamHttpStatus,
+      })
+    }
+    return payload as MimoChatCompletionResponse
+  } catch (error) {
+    if (options.operation === 'research') {
+      const responseStatus = error instanceof MimoServiceError
+        ? error.statusCode
+        : error instanceof Error && error.name === 'AbortError'
+          ? 504
+          : 502
+      console.error('[mimo:research] request failed', {
+        durationMs: Date.now() - startedAt,
+        upstreamHttpStatus,
+        responseStatus,
+      })
+    }
+    if (error instanceof MimoServiceError) throw error
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new MimoServiceError('MIMO_TIMEOUT', 504, 'MiMo API 请求超时。')
+    }
+    throw new MimoServiceError('MIMO_NETWORK_ERROR', 502, '无法连接 MiMo API。')
+  } finally {
+    clearTimeout(timeout)
+    releaseAiSlot()
+  }
+}
+
+export function getAssistantContent(payload: MimoChatCompletionResponse) {
+  const content = payload.choices?.[0]?.message?.content
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo API 未返回有效内容。')
+  }
+  return content.trim()
+}
+
+export async function testMimoConnection() {
+  const payload = await requestMimo({
+    messages: [
+      { role: 'system', content: '请严格按照用户要求，用最短文本回答。' },
+      { role: 'user', content: '这是连通性测试，请只回复 OK。' },
+    ],
+    max_completion_tokens: 16,
+    temperature: 0,
+    stream: false,
+    thinking: { type: 'disabled' },
+  })
+  return { model: payload.model ?? getMimoConfiguration().model, content: getAssistantContent(payload) }
+}
+
+export async function researchWithMimo(request: ResearchRequest): Promise<ResearchResponse> {
+  const prompt = `请针对“${request.topic}”执行真实互联网检索并完成中文研究。\n研究目标：${request.goal}\n来源偏好：${request.sourcePreferences.join('、') || '官方网站、研究报告、学术论文、行业媒体'}\n目标检索数量：${request.targetSourceCount} 条\n\n要求：\n1. 尽量返回接近目标数量且互不重复的有效来源，优先官方机构、政府、论文、研究机构和主流媒体；\n2. 不得编造来源标题或 URL；无法确认的内容必须明确标记；\n3. 每条关键洞察必须列出支持它的真实来源 URL；\n4. 仅输出 JSON，不要 Markdown，结构为：\n{"summary":"研究摘要","insights":[{"title":"洞察标题","content":"洞察正文","sourceUrls":["搜索结果中的真实URL"]}],"warnings":[]}`
+
+  const payload = await requestMimo(
+    {
+      messages: [
+        {
+          role: 'system',
+          content: '你是严谨的中文行业研究员。只能引用联网搜索实际返回的来源，不得补写或猜测 URL。',
+        },
+        { role: 'user', content: prompt },
+      ],
+      tools: [
+        {
+          type: 'web_search',
+          max_keyword: Math.min(8, Math.max(4, Math.ceil(request.targetSourceCount / 4))),
+          force_search: true,
+          limit: request.targetSourceCount,
+        },
+      ],
+      max_completion_tokens: 4096,
+      temperature: 0.2,
+      stream: false,
+      thinking: { type: 'disabled' },
+    },
+    { timeoutMs: getResearchRequestTimeoutMs(), operation: 'research' },
+  )
+
+  const {
+    actualSourceCount,
+    deduplicatedMetadata,
+  } = extractVerifiedSearchMetadata(payload)
+  if (deduplicatedMetadata.length === 0) {
+    throw new MimoServiceError('NO_REAL_SOURCES', 502, 'MiMo 未返回可验证的真实联网来源。')
+  }
+
+  const modelResult = parseModelResearchPayload(getAssistantContent(payload))
+  const sources = buildResearchSources(
+    deduplicatedMetadata.slice(0, request.targetSourceCount),
+  )
+  const { insights, hasUnlinkedInsight } = buildResearchInsights(modelResult.insights, sources)
+  const warnings = [...modelResult.warnings]
+  if (hasUnlinkedInsight) {
+    warnings.push('部分洞察未能与 MiMo 返回的联网搜索元数据建立可靠关联，请打开来源复核。')
+  }
+  if (sources.length < request.targetSourceCount) {
+    warnings.push(
+      `目标检索 ${request.targetSourceCount} 条，去重并校验链接后获得 ${sources.length} 条有效来源；实际数量可能受搜索覆盖、URL 去重和链接有效性影响。`,
+    )
+  }
+
+  return {
+    taskId: request.taskId,
+    requestId: request.requestId,
+    mode: 'live',
+    dataSource: 'real',
+    topic: request.topic,
+    summary: modelResult.summary,
+    insights,
+    sources,
+    warnings: [...new Set(warnings)],
+    targetSourceCount: request.targetSourceCount,
+    actualSourceCount,
+    deduplicatedSourceCount: deduplicatedMetadata.length,
+    validSourceCount: sources.length,
+    searchedAt: new Date().toISOString(),
+  }
+}

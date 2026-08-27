@@ -70,9 +70,9 @@ const depthEstimates: Record<
   ResearchDepth,
   Pick<ResearchPlan, 'estimatedSourceCount' | 'estimatedDurationMinutes'>
 > = {
-  quick: { estimatedSourceCount: 8, estimatedDurationMinutes: 2 },
-  deep: { estimatedSourceCount: 16, estimatedDurationMinutes: 5 },
-  professional: { estimatedSourceCount: 30, estimatedDurationMinutes: 15 },
+  quick: { estimatedSourceCount: 12, estimatedDurationMinutes: 2 },
+  deep: { estimatedSourceCount: 12, estimatedDurationMinutes: 5 },
+  professional: { estimatedSourceCount: 12, estimatedDurationMinutes: 15 },
 }
 
 function createGenericTemplate(topic: string): ResearchPlanTemplate {
@@ -106,6 +106,7 @@ export function createResearchPlan(
     sourcePreferences: [...template.sourcePreferences],
     ...depthEstimates[depth],
     usesPrototypeData: topic.usesPrototypeData,
+    dataSource: 'mock',
     updatedAt: now,
     confirmedAt: null,
   }

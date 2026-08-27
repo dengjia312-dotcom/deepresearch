@@ -4,17 +4,23 @@ import {
   Database,
   Filter,
   ListTree,
+  LoaderCircle,
   Search,
   ShieldCheck,
   Tags,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { PrototypeDataNotice } from '../components/PrototypeDataNotice'
 import { ResearchPoolCard } from '../components/ResearchPoolCard'
 import { StatusBadge } from '../components/StatusBadge'
 import { TagBadge } from '../components/TagBadge'
-import { useResearch } from '../context/ResearchContext'
+import {
+  getTaskRoute,
+  getTaskSourceRoute,
+  MIN_OUTLINE_SOURCE_COUNT,
+  useResearch,
+} from '../context/ResearchContext'
 import type { ReviewStatus } from '../types'
 
 const filterOptions: Array<{ label: string; value: 'all' | ReviewStatus }> = [
@@ -24,17 +30,32 @@ const filterOptions: Array<{ label: string; value: 'all' | ReviewStatus }> = [
   { label: '待评估', value: 'unreviewed' },
   { label: '无关', value: 'irrelevant' },
 ]
+const outlineProgressMessages = ['正在分析资料来源', '正在组织研究结构', '正在检查证据覆盖']
 
 export function ResearchPoolPage() {
   const navigate = useNavigate()
   const {
+    state,
     poolSources,
     eligibleSources,
-    currentTopic,
+    eligibleRealSources,
     setReviewStatus,
     generateOutline,
+    useMockOutline,
   } = useResearch()
   const [filter, setFilter] = useState<'all' | ReviewStatus>('all')
+  const [outlineProgressIndex, setOutlineProgressIndex] = useState(0)
+
+  useEffect(() => {
+    if (state.outlineStatus !== 'loading') {
+      setOutlineProgressIndex(0)
+      return
+    }
+    const timer = window.setInterval(() => {
+      setOutlineProgressIndex((index) => (index + 1) % outlineProgressMessages.length)
+    }, 1200)
+    return () => window.clearInterval(timer)
+  }, [state.outlineStatus])
 
   const filteredSources = useMemo(
     () =>
@@ -66,6 +87,7 @@ export function ResearchPoolPage() {
   }, [poolSources])
 
   const reviewedCount = poolSources.length - counts.unreviewed
+  const hasMockSources = poolSources.some(({ item }) => item.dataSource === 'mock')
   const reviewedPercent = poolSources.length
     ? Math.round((reviewedCount / poolSources.length) * 100)
     : 0
@@ -73,8 +95,8 @@ export function ResearchPoolPage() {
     ? Math.round((counts.trusted / poolSources.length) * 100)
     : 0
 
-  const handleGenerateOutline = () => {
-    if (generateOutline()) navigate('/outline')
+  const handleGenerateOutline = async () => {
+    if (await generateOutline()) navigate(getTaskRoute(state.task.id, 'outline'))
   }
 
   return (
@@ -89,32 +111,69 @@ export function ResearchPoolPage() {
             </span>
           </div>
           <p className="mt-1 text-sm text-ink-muted">
-            先判断资料是否可信、存疑或无关，再用可用资料生成研究大纲。
+            先判断资料是否可信、存疑或无关，至少准备 {MIN_OUTLINE_SOURCE_COUNT} 条有效资料后生成研究大纲。
           </p>
+          {state.searchMode === 'real' && state.liveResearchResult && (
+            <p className="mt-2 text-xs text-ink-subtle">
+              目标 {state.liveResearchResult.targetSourceCount} 条 · 实际返回 {state.liveResearchResult.actualSourceCount} 条 · 去重后 {state.liveResearchResult.deduplicatedSourceCount} 条 · 当前已选有效 {eligibleRealSources.length} 条
+            </p>
+          )}
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => navigate('/search')} className="btn-secondary h-10 px-4">
+          <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'search'))} className="btn-secondary h-10 px-4">
             <Search size={15} />
             继续添加资料
           </button>
+          {hasMockSources && eligibleRealSources.length < MIN_OUTLINE_SOURCE_COUNT && (
+            <button
+              type="button"
+              onClick={() => {
+                useMockOutline()
+                navigate(getTaskRoute(state.task.id, 'outline'))
+              }}
+              className="btn-secondary h-10 px-4"
+            >
+              使用演示大纲
+            </button>
+          )}
           <button
             type="button"
             onClick={handleGenerateOutline}
-            disabled={eligibleSources.length === 0}
+            disabled={eligibleRealSources.length < MIN_OUTLINE_SOURCE_COUNT || state.outlineStatus === 'loading'}
             className="btn-primary"
           >
-            <ListTree size={16} />
+            {state.outlineStatus === 'loading'
+              ? <LoaderCircle size={16} className="animate-spin" />
+              : <ListTree size={16} />}
             生成研究大纲
             <span className="rounded bg-white/15 px-1.5 py-0.5 text-[10px]">
-              {eligibleSources.length}
+              {eligibleRealSources.length}
             </span>
           </button>
         </div>
       </section>
 
-      {currentTopic.usesPrototypeData && (
-        <PrototypeDataNotice topic={currentTopic.topic} className="mb-5" />
+      {state.outlineStatus === 'loading' && (
+        <section className="ai-response-block mb-5 p-4" aria-live="polite">
+          <p className="text-sm font-semibold text-ink">MiMo 正在基于资料池生成真实大纲</p>
+          <p className="mt-2 text-xs text-ink-muted">{outlineProgressMessages[outlineProgressIndex]}</p>
+        </section>
+      )}
+
+      {state.outlineStatus === 'error' && state.outlineError && (
+        <section className="mb-5 rounded-lg border border-rose-200 bg-rose-50 p-4">
+          <p className="text-sm font-semibold text-rose-800">真实大纲生成失败</p>
+          <p className="mt-1 text-sm text-rose-700">{state.outlineError}</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" onClick={handleGenerateOutline} className="btn-secondary">重新生成</button>
+            <button type="button" onClick={() => { useMockOutline(); navigate(getTaskRoute(state.task.id, 'outline')) }} className="btn-secondary">使用演示大纲</button>
+          </div>
+        </section>
+      )}
+
+      {hasMockSources && (
+        <PrototypeDataNotice topic={state.task.title} className="mb-5" />
       )}
 
       <div className="mb-5 flex items-center gap-2 overflow-x-auto pb-1">
@@ -147,9 +206,9 @@ export function ResearchPoolPage() {
           </span>
           <h2 className="mt-5 text-lg font-semibold text-ink">资料池还是空的</h2>
           <p className="mt-2 max-w-md text-sm leading-[22px] text-ink-muted">
-            研究大纲只能使用资料池中的来源。请先从 AI 搜索结果中选择至少一条可用资料。
+            研究大纲只能使用资料池中的来源。请先从 AI 搜索结果中选择至少 {MIN_OUTLINE_SOURCE_COUNT} 条有效资料。
           </p>
-          <button type="button" onClick={() => navigate('/search')} className="btn-primary mt-6">
+          <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'search'))} className="btn-primary mt-6">
             前往 AI 搜索
             <ArrowRight size={15} />
           </button>
@@ -166,7 +225,9 @@ export function ResearchPoolPage() {
                     item={item}
                     onReviewStatusChange={setReviewStatus}
                     onOpen={(sourceId) =>
-                      navigate(`/sources/${sourceId}`, { state: { from: '/pool' } })
+                      navigate(getTaskSourceRoute(state.task.id, sourceId), {
+                        state: { from: getTaskRoute(state.task.id, 'pool') },
+                      })
                     }
                   />
                 ))}
@@ -227,7 +288,7 @@ export function ResearchPoolPage() {
               <div className="mt-5 grid grid-cols-2 gap-2 border-t border-outline pt-5">
                 <div className="rounded-lg bg-slate-50 p-3">
                   <p className="text-[11px] text-ink-subtle">可用于大纲</p>
-                  <p className="mt-1 text-xl font-semibold text-ink">{eligibleSources.length}</p>
+                  <p className="mt-1 text-xl font-semibold text-ink">{eligibleRealSources.length}</p>
                 </div>
                 <div className="rounded-lg bg-slate-50 p-3">
                   <p className="text-[11px] text-ink-subtle">排除无关</p>

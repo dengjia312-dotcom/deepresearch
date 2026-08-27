@@ -11,8 +11,12 @@ import {
 import { useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { TopicCorrectionPrompt } from '../components/TopicCorrectionPrompt'
-import { useResearch } from '../context/ResearchContext'
-import { recentTasks } from '../data/mockData'
+import {
+  getTaskRoute,
+  type ResearchState,
+  type ResearchTaskPage,
+  useResearch,
+} from '../context/ResearchContext'
 import { getTopicCorrection, normalizeTopicInput } from '../data/researchTopics'
 import type { ResearchDepth, TopicCorrection } from '../types'
 
@@ -26,18 +30,45 @@ const depthOptions: Array<{
   { value: 'professional', label: '专业分析', description: '约 15 分钟' },
 ]
 
+function getResumePage(state: ResearchState): ResearchTaskPage {
+  if (!state.researchPlan?.confirmedAt) return 'plan'
+  if (state.reportGenerated) return 'report'
+  if (state.outlineGenerated) return 'outline'
+  if (state.poolItems.length > 0) return 'pool'
+  return 'search'
+}
+
+function getDepthLabel(depth: ResearchDepth) {
+  return depthOptions.find((option) => option.value === depth)?.label ?? '研究任务'
+}
+
+function formatTaskTime(createdAt: string) {
+  const date = new Date(createdAt)
+  return Number.isNaN(date.getTime())
+    ? '时间未知'
+    : new Intl.DateTimeFormat('zh-CN', {
+        month: 'numeric',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(date)
+}
+
 export function TaskCreationPage() {
   const navigate = useNavigate()
-  const { prepareResearch, setNotice } = useResearch()
+  const { prepareResearch, tasks, switchTask, databaseError, isHydrating } = useResearch()
   const [query, setQuery] = useState('')
   const [depth, setDepth] = useState<ResearchDepth>('deep')
   const [error, setError] = useState('')
   const [correction, setCorrection] = useState<TopicCorrection | null>(null)
+  const [creating, setCreating] = useState(false)
 
-  const openResearchPlan = (originalTopic: string, selectedTopic: string) => {
+  const openResearchPlan = async (originalTopic: string, selectedTopic: string) => {
     setCorrection(null)
-    prepareResearch(originalTopic, selectedTopic, depth)
-    navigate('/plan')
+    setCreating(true)
+    const taskId = await prepareResearch(originalTopic, selectedTopic, depth)
+    setCreating(false)
+    if (taskId) navigate(getTaskRoute(taskId, 'plan'))
   }
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -54,7 +85,7 @@ export function TaskCreationPage() {
       return
     }
 
-    openResearchPlan(title, title)
+    void openResearchPlan(title, title)
   }
 
   return (
@@ -112,6 +143,7 @@ export function TaskCreationPage() {
               </label>
               <button
                 type="submit"
+                disabled={creating || isHydrating}
                 className="btn-primary h-11 px-5 sm:h-12"
               >
                 <Sparkles size={17} />
@@ -119,8 +151,8 @@ export function TaskCreationPage() {
               </button>
             </div>
             <div className="mt-2 min-h-5 px-2">
-              {error ? (
-                <p className="text-xs font-medium text-red-600">{error}</p>
+              {error || databaseError ? (
+                <p className="text-xs font-medium text-red-600">{error || databaseError}</p>
               ) : (
                 <p className="text-xs text-ink-subtle">
                   当前模式：{depthOptions.find((option) => option.value === depth)?.label}，将优先交叉验证来源。
@@ -131,11 +163,11 @@ export function TaskCreationPage() {
               <TopicCorrectionPrompt
                 correction={correction}
                 className="mt-3"
-                onAccept={() => openResearchPlan(
+                onAccept={() => void openResearchPlan(
                   correction.inputTopic,
                   correction.suggestedTopic,
                 )}
-                onKeep={() => openResearchPlan(
+                onKeep={() => void openResearchPlan(
                   correction.inputTopic,
                   correction.inputTopic,
                 )}
@@ -152,7 +184,7 @@ export function TaskCreationPage() {
             </div>
             <button
               type="button"
-              onClick={() => setNotice('演示工作区已展示最近的 3 个任务。')}
+              onClick={() => tasks[0] && navigate(getTaskRoute(tasks[0].task.id, getResumePage(tasks[0])))}
               className="focus-ring inline-flex items-center gap-1 rounded-md text-xs font-semibold text-primary-deep hover:underline"
             >
               查看全部
@@ -161,64 +193,75 @@ export function TaskCreationPage() {
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
-            {recentTasks.map((task) => (
+            {tasks.map((taskState) => {
+              const task = taskState.task
+              const processing = taskState.planStatus === 'loading'
+                || taskState.searchStatus === 'loading'
+                || taskState.outlineStatus === 'loading'
+                || taskState.reportStatus === 'loading'
+              return (
               <button
                 key={task.id}
                 type="button"
                 onClick={() => {
-                  prepareResearch(task.title, task.title, 'deep')
-                  setNotice('已根据该主题生成研究计划。')
-                  navigate('/plan')
+                  switchTask(task.id)
+                  navigate(getTaskRoute(task.id, getResumePage(taskState)))
                 }}
                 className="surface-card focus-ring min-h-[180px] p-5 text-left transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-ambient"
               >
                 <div className="flex items-center justify-between gap-3">
                   <span
                     className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-semibold ${
-                      task.state === 'processing'
+                      processing
                         ? 'bg-blue-50 text-blue-700'
-                        : task.state === 'complete'
+                        : task.status === 'reported'
                           ? 'bg-emerald-50 text-emerald-700'
                           : 'bg-slate-100 text-slate-600'
                     }`}
                   >
-                    {task.state === 'processing' ? (
+                    {processing ? (
                       <Gauge size={12} />
                     ) : (
                       <Database size={12} />
                     )}
-                    {task.mode}
+                    {getDepthLabel(task.depth)}
                   </span>
                   <span className="inline-flex items-center gap-1 text-[11px] text-ink-subtle">
                     <Clock3 size={12} />
-                    {task.time}
+                    {formatTaskTime(task.createdAt)}
                   </span>
                 </div>
                 <h3 className="mt-5 line-clamp-2 text-base font-semibold leading-6 text-ink">
                   {task.title}
                 </h3>
                 <div className="mt-5 border-t border-outline pt-4">
-                  {task.progress ? (
+                  {processing ? (
                     <div>
                       <div className="mb-2 flex justify-between text-[11px] text-ink-subtle">
-                        <span>正在提取核心观点</span>
-                        <span>{task.progress}%</span>
+                        <span>任务处理中</span>
+                        <span>{task.status === 'searching' ? '检索' : '生成'}</span>
                       </div>
                       <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
                         <div
                           className="h-full rounded-full bg-primary"
-                          style={{ width: `${task.progress}%` }}
+                          style={{ width: '68%' }}
                         />
                       </div>
                     </div>
                   ) : (
                     <span className="text-xs font-medium text-ink-muted">
-                      已整理 {task.sourceCount} 条来源
+                      已整理 {taskState.poolItems.length} 条资料
                     </span>
                   )}
                 </div>
               </button>
-            ))}
+              )
+            })}
+            {tasks.length === 0 && (
+              <div className="surface-card col-span-full p-8 text-center text-sm text-ink-muted">
+                暂无研究任务，创建后的任务会保存在这里。
+              </div>
+            )}
           </div>
         </section>
       </div>

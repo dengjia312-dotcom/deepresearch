@@ -7,47 +7,93 @@ import {
   Database,
   FileSearch,
   ListChecks,
+  LoaderCircle,
   Plus,
+  RefreshCw,
   Sparkles,
   Target,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { PrototypeDataNotice } from '../components/PrototypeDataNotice'
-import {
-  RESEARCH_STEP_DURATION_MS,
-  ResearchProgressOverlay,
-  researchProgressSteps,
-} from '../components/ResearchProgressOverlay'
-import { useResearch } from '../context/ResearchContext'
+import { getTaskRoute, useResearch } from '../context/ResearchContext'
 import { sourcePreferenceOptions } from '../data/researchPlans'
+import type { SearchDepth } from '../types'
 
 const workflowSteps = ['主题确认', '研究计划', 'AI 搜索'] as const
+const searchDepthOptions: Array<{
+  value: SearchDepth
+  label: string
+  count: number | null
+}> = [
+  { value: 'concise', label: '精简', count: 8 },
+  { value: 'standard', label: '标准', count: 12 },
+  { value: 'deep', label: '深度', count: 16 },
+  { value: 'custom', label: '自定义', count: null },
+]
 
 export function ResearchPlanPage() {
   const navigate = useNavigate()
   const {
     state,
-    currentTopic,
     updatePlanScope,
     updatePlanQuestion,
     addPlanQuestion,
     removePlanQuestion,
     toggleSourcePreference,
+    setSearchConfig,
     confirmResearchPlan,
+    retryResearchPlan,
+    useMockPlan,
     setNotice,
   } = useResearch()
   const plan = state.researchPlan
-  const [isResearching, setIsResearching] = useState(false)
-  const [activeStep, setActiveStep] = useState(0)
-  const simulationToken = useRef(0)
+  const isResearching = false
 
-  useEffect(() => () => {
-    simulationToken.current += 1
-  }, [])
-
-  if (!plan) return <Navigate to="/" replace />
+  if (!plan) {
+    return (
+      <div className="page-shell flex min-h-[calc(100dvh-56px)] items-center justify-center py-10">
+        <section className="surface-card w-full max-w-2xl p-8 text-center sm:p-10">
+          {state.planStatus === 'loading' ? (
+            <>
+              <LoaderCircle size={30} className="mx-auto animate-spin text-primary" />
+              <span className="section-label mt-5 inline-block">Research Planning</span>
+              <h1 className="mt-2 text-2xl font-semibold text-ink">正在生成真实研究计划</h1>
+              <p className="mt-3 text-sm text-ink-muted">
+                MiMo 正在根据“{state.task.title}”生成研究目标、研究范围与核心问题。
+              </p>
+            </>
+          ) : (
+            <>
+              <span className="section-label">Research Planning</span>
+              <h1 className="mt-2 text-2xl font-semibold text-ink">研究计划生成失败</h1>
+              <p className="mt-3 text-sm leading-6 text-rose-700">
+                {state.planError ?? '研究计划尚未生成，请重试。'}
+              </p>
+              <p className="mt-2 text-xs text-ink-subtle">
+                主题“{state.task.title}”已保留，不会自动填充占位计划。
+              </p>
+              <div className="mt-6 flex flex-wrap justify-center gap-2">
+                <button type="button" onClick={() => void retryResearchPlan()} className="btn-primary">
+                  <RefreshCw size={15} />
+                  重新生成
+                </button>
+                <button type="button" onClick={useMockPlan} className="btn-secondary h-10 px-4">
+                  使用演示计划
+                </button>
+                <button type="button" onClick={() => navigate('/')} className="btn-secondary h-10 px-4">
+                  返回修改主题
+                </button>
+              </div>
+              <p className="mt-3 text-xs text-ink-subtle">
+                演示计划只会在你主动选择后加载。
+              </p>
+            </>
+          )}
+        </section>
+      </div>
+    )
+  }
 
   const hasIncompleteQuestion = plan.questions.some(
     (question) => !question.text.trim(),
@@ -60,7 +106,6 @@ export function ResearchPlanPage() {
   )
 
   const handleStartResearch = async () => {
-    if (isResearching) return
     if (!plan.scope.trim()) {
       setNotice('请先补充研究范围。')
       return
@@ -73,24 +118,9 @@ export function ResearchPlanPage() {
       setNotice('请至少选择一种来源偏好。')
       return
     }
-    if (!confirmResearchPlan()) return
+    if (!await confirmResearchPlan()) return
 
-    const token = simulationToken.current + 1
-    simulationToken.current = token
-    setActiveStep(0)
-    setIsResearching(true)
-
-    for (let index = 0; index < researchProgressSteps.length; index += 1) {
-      setActiveStep(index)
-      await new Promise((resolve) => {
-        window.setTimeout(resolve, RESEARCH_STEP_DURATION_MS)
-      })
-      if (simulationToken.current !== token) return
-    }
-
-    setNotice('搜索结果与研究洞察已整理完成。')
-    setIsResearching(false)
-    navigate('/search')
+    navigate(getTaskRoute(state.task.id, 'search'))
   }
 
   return (
@@ -115,6 +145,28 @@ export function ResearchPlanPage() {
           返回修改主题
         </button>
       </section>
+
+      {state.planStatus === 'loading' && (
+        <section className="ai-response-block mb-5 p-4" aria-live="polite">
+          <p className="text-sm font-semibold text-ink">正在重新生成研究计划</p>
+          <p className="mt-1 text-xs text-ink-muted">新计划生成前，上次成功计划会继续保留。</p>
+        </section>
+      )}
+
+      {state.planStatus === 'error' && state.planError && (
+        <section className="mb-5 rounded-lg border border-rose-200 bg-rose-50 p-4" role="alert">
+          <p className="text-sm font-semibold text-rose-800">本次计划生成失败，上次成功计划已保留。</p>
+          <p className="mt-1 text-sm text-rose-700">{state.planError}</p>
+          <button
+            type="button"
+            onClick={() => void retryResearchPlan()}
+            className="btn-secondary mt-3"
+          >
+            <RefreshCw size={15} />
+            重新生成
+          </button>
+        </section>
+      )}
 
       <ol
         className="surface-card mb-5 grid overflow-hidden sm:grid-cols-3"
@@ -148,7 +200,7 @@ export function ResearchPlanPage() {
         })}
       </ol>
 
-      {currentTopic.usesPrototypeData && (
+      {state.planMode === 'mock' && (
         <PrototypeDataNotice topic={state.task.title} className="mb-5" />
       )}
 
@@ -182,8 +234,10 @@ export function ResearchPlanPage() {
                 <p className="text-xs font-semibold text-ink-muted">研究目标</p>
                 <div className="ai-response-block mt-2 p-4">
                   <div className="mb-2 flex items-center gap-2 text-primary-deep">
-                    <Sparkles size={15} />
-                    <span className="text-xs font-semibold">AI 生成目标</span>
+                  <Sparkles size={15} />
+                    <span className="text-xs font-semibold">
+                      {state.planMode === 'real' ? 'MiMo 真实生成目标' : '演示计划目标'}
+                    </span>
                   </div>
                   <p className="text-sm leading-6 text-ink-muted">{plan.objective}</p>
                 </div>
@@ -315,14 +369,62 @@ export function ResearchPlanPage() {
 
               <div className="my-5 border-t border-outline" />
 
+              <h3 className="text-xs font-semibold text-ink-muted">检索深度</h3>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {searchDepthOptions.map((option) => {
+                  const selected = state.task.searchDepth === option.value
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setSearchConfig(
+                        option.value,
+                        option.count ?? state.task.targetSourceCount,
+                      )}
+                      className={`focus-ring rounded-lg border px-3 py-2.5 text-left transition ${
+                        selected
+                          ? 'border-blue-200 bg-primary-soft text-primary-deep'
+                          : 'border-outline bg-white text-ink-muted hover:border-slate-300'
+                      }`}
+                    >
+                      <span className="block text-xs font-semibold">{option.label}</span>
+                      <span className="mt-0.5 block text-[11px]">
+                        {option.count ? `${option.count} 条` : '8—30 条'}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+              {state.task.searchDepth === 'custom' && (
+                <label className="mt-3 block">
+                  <span className="text-[11px] font-medium text-ink-muted">自定义目标数量</span>
+                  <input
+                    type="number"
+                    min={8}
+                    max={30}
+                    value={state.task.targetSourceCount}
+                    onChange={(event) => setSearchConfig(
+                      'custom',
+                      Number(event.target.value) || 8,
+                    )}
+                    className="focus-ring mt-1 h-10 w-full rounded-lg border border-outline bg-white px-3 text-sm text-ink outline-none"
+                  />
+                </label>
+              )}
+              <p className="mt-2 text-[11px] leading-4 text-ink-subtle">
+                目标数量最低 8 条；实际结果可能因 URL 去重、链接有效性和主题相关性少于目标值。
+              </p>
+
+              <div className="my-5 border-t border-outline" />
+
               <h3 className="text-xs font-semibold text-ink-muted">执行预估</h3>
               <div className="mt-3 grid grid-cols-2 gap-3">
                 <div className="rounded-lg border border-outline bg-slate-50 p-3.5">
                   <Database size={16} className="text-primary-deep" />
                   <p className="mt-2 text-lg font-semibold text-ink">
-                    约 {plan.estimatedSourceCount} 条
+                    {state.task.targetSourceCount} 条
                   </p>
-                  <p className="mt-0.5 text-[11px] text-ink-subtle">预计来源数量</p>
+                  <p className="mt-0.5 text-[11px] text-ink-subtle">目标检索数量</p>
                 </div>
                 <div className="rounded-lg border border-outline bg-slate-50 p-3.5">
                   <Clock3 size={16} className="text-primary-deep" />
@@ -358,13 +460,6 @@ export function ResearchPlanPage() {
           </section>
         </aside>
       </div>
-
-      {isResearching && (
-        <ResearchProgressOverlay
-          topic={state.task.title}
-          activeIndex={activeStep}
-        />
-      )}
     </div>
   )
 }

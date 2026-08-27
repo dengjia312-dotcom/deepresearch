@@ -11,7 +11,17 @@ import { useNavigate } from 'react-router-dom'
 import { CitationPanel } from '../components/CitationPanel'
 import { PrototypeDataNotice } from '../components/PrototypeDataNotice'
 import { StatusBadge } from '../components/StatusBadge'
-import { useResearch } from '../context/ResearchContext'
+import {
+  getTaskRoute,
+  getTaskSourceRoute,
+  useResearch,
+} from '../context/ResearchContext'
+
+const reportDepthLabels = {
+  brief: '简要报告',
+  standard: '标准报告',
+  deep: '深度报告',
+} as const
 
 export function ReportPage() {
   const navigate = useNavigate()
@@ -21,22 +31,31 @@ export function ReportPage() {
     reportSections,
     getSource,
     generateReport,
+    useMockReport,
     setNotice,
   } = useResearch()
 
   const citedSources = useMemo(() => {
     const ids: string[] = []
-    reportSections.forEach((section) => {
-      section.paragraphs.forEach((paragraph) => {
-        paragraph.segments.forEach((segment) => {
-          if (segment.type === 'citation' && !ids.includes(segment.sourceId)) {
-            ids.push(segment.sourceId)
-          }
+    if (state.reportMode === 'real' && state.liveReport) {
+      state.liveReport.report.sections.forEach((section) => {
+        section.paragraphs.forEach((paragraph) => {
+          paragraph.sourceIds.forEach((sourceId) => {
+            if (!ids.includes(sourceId)) ids.push(sourceId)
+          })
         })
       })
-    })
+    } else {
+      reportSections.forEach((section) => {
+        section.paragraphs.forEach((paragraph) => {
+          paragraph.segments.forEach((segment) => {
+            if (segment.type === 'citation' && !ids.includes(segment.sourceId)) ids.push(segment.sourceId)
+          })
+        })
+      })
+    }
     return ids.flatMap((id) => (getSource(id) ? [getSource(id)!] : []))
-  }, [getSource, reportSections])
+  }, [getSource, reportSections, state.liveReport, state.reportMode])
 
   const [activeSourceId, setActiveSourceId] = useState<string | null>(
     citedSources[0]?.id ?? null,
@@ -75,29 +94,38 @@ export function ReportPage() {
           </span>
           <span className="section-label mt-5 inline-block">Research Report</span>
           <h1 className="mt-2 text-2xl font-semibold text-ink">研究报告尚未生成</h1>
-          {currentTopic.usesPrototypeData && (
+          {state.reportMode === 'mock' && (
             <PrototypeDataNotice topic={currentTopic.topic} className="mt-5 text-left" />
           )}
           <p className="mx-auto mt-3 max-w-lg text-sm leading-[22px] text-ink-muted">
             报告需要先有研究大纲，并且所有正文引用都将映射到大纲使用的资料池来源。
           </p>
           <div className="mt-7 flex flex-wrap justify-center gap-2">
-            <button type="button" onClick={() => navigate('/outline')} className="btn-secondary h-10 px-4">
+            <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'outline'))} className="btn-secondary h-10 px-4">
               查看研究大纲
             </button>
             <button
               type="button"
-              onClick={() => {
-                if (generateReport()) return
-                navigate('/outline')
+              onClick={async () => {
+                if (await generateReport()) return
+                if (state.reportStatus !== 'error') navigate(getTaskRoute(state.task.id, 'outline'))
               }}
-              disabled={!state.outlineGenerated}
+              disabled={!state.outlineGenerated || state.reportStatus === 'loading'}
               className="btn-primary"
             >
               生成研究报告
               <ArrowRight size={15} />
             </button>
           </div>
+          {state.reportStatus === 'loading' && (
+            <p className="mt-4 text-xs text-ink-muted">正在撰写章节 · 正在绑定来源引用 · 正在检查证据完整性</p>
+          )}
+          {state.reportStatus === 'error' && state.reportError && (
+            <div className="mt-5 rounded-lg border border-rose-200 bg-rose-50 p-4 text-left">
+              <p className="text-sm text-rose-700">{state.reportError}</p>
+              <button type="button" onClick={useMockReport} className="btn-secondary mt-3">使用演示报告</button>
+            </div>
+          )}
         </section>
       </div>
     )
@@ -111,9 +139,10 @@ export function ReportPage() {
           <div className="mt-2 flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-semibold leading-8 tracking-[-0.01em] text-ink">研究报告</h1>
             <StatusBadge value="reported" />
+            {state.reportMode === 'real' && <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-primary-deep">真实报告</span>}
           </div>
           <p className="mt-1 text-sm text-ink-muted">
-            正文包含 {citedSources.length} 条可追溯引用，点击标记可定位到来源。
+            正文包含 {citedSources.length} 条可追溯引用；目标 {state.liveReport?.targetMinWords ?? state.task.reportTargetMinWords}—{state.liveReport?.targetMaxWords ?? state.task.reportTargetMaxWords} 字，实际 {state.liveReport?.actualWordCount ?? '—'} 字。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -132,7 +161,28 @@ export function ReportPage() {
         </div>
       </section>
 
-      {currentTopic.usesPrototypeData && (
+      {state.reportStatus === 'loading' && (
+        <section className="ai-response-block mb-5 p-4" aria-live="polite">
+          <p className="text-sm font-semibold text-ink">正在重新生成当前报告</p>
+          <p className="mt-1 text-xs text-ink-muted">新报告成功前，上次成功报告会继续保留。</p>
+        </section>
+      )}
+
+      {state.reportStatus === 'error' && state.reportError && (
+        <section className="mb-5 rounded-lg border border-rose-200 bg-rose-50 p-4" role="alert">
+          <p className="text-sm font-semibold text-rose-800">本次报告生成失败，上次成功报告已保留。</p>
+          <p className="mt-1 text-sm text-rose-700">{state.reportError}</p>
+          <button
+            type="button"
+            onClick={() => void generateReport()}
+            className="btn-secondary mt-3"
+          >
+            重新生成当前报告
+          </button>
+        </section>
+      )}
+
+      {state.reportMode === 'mock' && (
         <PrototypeDataNotice topic={currentTopic.topic} className="mb-5" />
       )}
 
@@ -144,19 +194,90 @@ export function ReportPage() {
               <span className="section-label">AI Research Workspace</span>
             </div>
             <h1 className="text-[30px] font-bold leading-[40px] tracking-[-0.02em] text-ink sm:text-[36px] sm:leading-[46px]">
-              {currentTopic.report.title}
+              {state.reportMode === 'real' && state.liveReport
+                ? state.liveReport.report.title
+                : currentTopic.report.title}
             </h1>
             <div className="mt-5 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink-subtle">
               <span>研究深度：{state.task.depth === 'professional' ? '专业分析' : state.task.depth === 'quick' ? '快速概览' : '深度研究'}</span>
               <span>·</span>
               <span>来源：{citedSources.length} 条</span>
               <span>·</span>
+              <span>
+                {reportDepthLabels[state.liveReport?.reportDepth ?? state.task.reportDepth]}
+              </span>
+              <span>·</span>
+              <span>
+                目标 {state.liveReport?.targetMinWords ?? state.task.reportTargetMinWords}—{state.liveReport?.targetMaxWords ?? state.task.reportTargetMaxWords} 字
+              </span>
+              <span>·</span>
+              <span>实际 {state.liveReport?.actualWordCount ?? '—'} 字</span>
+              <span>·</span>
               <span>AI 辅助生成草稿</span>
             </div>
           </div>
 
           <div className="mt-8 space-y-9">
-            {reportSections.map((section) => (
+            {state.reportMode === 'real' && state.liveReport ? (
+              <>
+                <section className="rounded-lg bg-slate-50 p-5">
+                  <h2 className="text-lg font-semibold text-ink">执行摘要</h2>
+                  <p className="mt-3 text-base leading-[30px] text-ink-muted">{state.liveReport.report.executiveSummary}</p>
+                </section>
+                {state.liveReport.report.sections.map((section) => (
+                  <section key={section.id}>
+                    <h2 className="mb-4 text-xl font-semibold leading-8 text-ink">{section.title}</h2>
+                    <div className="space-y-5">
+                      {section.paragraphs.map((paragraph) => (
+                        <div key={paragraph.id}>
+                          <p className="text-base leading-[30px] text-ink-muted">
+                            {paragraph.content}
+                            {paragraph.sourceIds.map((sourceId) => {
+                              const citationNumber = citationNumberBySource.get(sourceId)
+                              return (
+                                <button
+                                  key={sourceId}
+                                  type="button"
+                                  data-citation-source={sourceId}
+                                  onClick={() => setActiveSourceId(sourceId)}
+                                  className={`focus-ring mx-0.5 inline-flex -translate-y-0.5 items-center rounded px-1.5 py-0.5 text-[11px] font-semibold ${activeSourceId === sourceId ? 'bg-primary text-white ring-2 ring-blue-100' : 'bg-primary-fixed text-primary-deep hover:bg-blue-200'}`}
+                                  aria-label={`查看引用 ${citationNumber}`}
+                                >
+                                  [{citationNumber}]
+                                </button>
+                              )
+                            })}
+                          </p>
+                          {paragraph.claimType !== 'source_supported' && (
+                            <span className={`mt-2 inline-flex rounded-full px-2 py-1 text-[10px] font-semibold ${paragraph.claimType === 'synthesis' ? 'bg-blue-50 text-primary-deep' : 'bg-amber-50 text-amber-700'}`}>
+                              {paragraph.claimType === 'synthesis' ? 'AI 综合分析' : '待验证'}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                ))}
+                <section>
+                  <h2 className="mb-3 text-xl font-semibold text-ink">总结</h2>
+                  <p className="text-base leading-[30px] text-ink-muted">{state.liveReport.report.conclusion}</p>
+                </section>
+                <section className="rounded-lg border border-amber-200 bg-amber-50 p-5">
+                  <h2 className="text-sm font-semibold text-amber-900">研究限制与待验证内容</h2>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-amber-800">
+                    {state.liveReport.report.limitations.map((limitation) => <li key={limitation}>{limitation}</li>)}
+                  </ul>
+                </section>
+                {state.liveReport.warnings.length > 0 && (
+                  <section className="rounded-lg border border-slate-200 bg-slate-50 p-5">
+                    <h2 className="text-sm font-semibold text-ink">生成提示</h2>
+                    {state.liveReport.warnings.map((warning) => (
+                      <p key={warning} className="mt-2 text-sm text-ink-muted">{warning}</p>
+                    ))}
+                  </section>
+                )}
+              </>
+            ) : reportSections.map((section) => (
               <section key={section.id}>
                 {section.heading && (
                   <h2 className="mb-4 text-xl font-semibold leading-8 tracking-[-0.01em] text-ink">
@@ -204,9 +325,9 @@ export function ReportPage() {
           </div>
 
           <footer className="mt-12 border-t border-outline pt-6 text-xs leading-5 text-ink-subtle">
-            {currentTopic.usesPrototypeData
-              ? '当前为产品原型演示数据，不代表真实搜索结果或正式研究结论。'
-              : '本报告使用预设演示数据生成，用于展示研究流程与引用追溯能力。'}
+            {state.reportMode === 'real'
+              ? '当前报告基于来源摘要和关键观点生成，建议通过原文链接复核重要结论。'
+              : '当前为用户主动选择的演示报告，不代表真实搜索结果或正式研究结论。'}
           </footer>
         </article>
 
@@ -214,6 +335,9 @@ export function ReportPage() {
           sources={citedSources}
           activeSourceId={activeSourceId}
           onSelect={selectFromPanel}
+          onOpenSource={(sourceId) => navigate(getTaskSourceRoute(state.task.id, sourceId), {
+            state: { from: getTaskRoute(state.task.id, 'report') },
+          })}
         />
       </div>
     </div>

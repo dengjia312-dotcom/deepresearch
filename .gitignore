@@ -11,3 +11,13 @@ Thumbs.db
 .vite/
 .idea/
 .vscode/
+.tmp/
+pgdata/
+coverage/
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.p12
+*.pfx

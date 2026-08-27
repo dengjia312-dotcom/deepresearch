@@ -4,19 +4,30 @@ import {
   FileText,
   Link2,
   ListTree,
+  LoaderCircle,
   Pencil,
   Plus,
   RefreshCw,
   Sparkles,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { OutlineSection } from '../components/OutlineSection'
 import { PrototypeDataNotice } from '../components/PrototypeDataNotice'
 import { StatusBadge } from '../components/StatusBadge'
 import { TagBadge } from '../components/TagBadge'
-import { useResearch } from '../context/ResearchContext'
-import type { OutlineSectionData } from '../types'
+import {
+  getTaskRoute,
+  getTaskSourceRoute,
+  MIN_OUTLINE_SOURCE_COUNT,
+  REPORT_DEPTH_RANGES,
+  useResearch,
+} from '../context/ResearchContext'
+import type { OutlineSectionData, ReportDepth } from '../types'
+
+const outlineProgressMessages = ['正在分析资料来源', '正在组织研究结构', '正在检查证据覆盖']
+const reportProgressMessages = ['正在撰写章节', '正在绑定来源引用', '正在检查证据完整性']
+const reportDepthOrder: ReportDepth[] = ['brief', 'standard', 'deep']
 
 function findSection(
   sections: OutlineSectionData[],
@@ -36,14 +47,36 @@ export function OutlinePage() {
     state,
     currentTopic,
     eligibleSources,
+    eligibleRealSources,
     outlineSections,
     generateOutline,
+    useMockOutline,
     generateReport,
+    useMockReport,
+    setReportDepth,
     getSource,
     getPoolItem,
     setNotice,
   } = useResearch()
   const [selectedSectionId, setSelectedSectionId] = useState('')
+  const [outlineProgressIndex, setOutlineProgressIndex] = useState(0)
+  const [reportProgressIndex, setReportProgressIndex] = useState(0)
+
+  useEffect(() => {
+    if (state.outlineStatus !== 'loading') return setOutlineProgressIndex(0)
+    const timer = window.setInterval(() => setOutlineProgressIndex(
+      (index) => (index + 1) % outlineProgressMessages.length,
+    ), 1200)
+    return () => window.clearInterval(timer)
+  }, [state.outlineStatus])
+
+  useEffect(() => {
+    if (state.reportStatus !== 'loading') return setReportProgressIndex(0)
+    const timer = window.setInterval(() => setReportProgressIndex(
+      (index) => (index + 1) % reportProgressMessages.length,
+    ), 1200)
+    return () => window.clearInterval(timer)
+  }, [state.reportStatus])
 
   const selectedSection = useMemo(
     () =>
@@ -56,9 +89,21 @@ export function OutlinePage() {
     () => selectedSection?.sourceIds.flatMap((id) => (getSource(id) ? [getSource(id)!] : [])) ?? [],
     [getSource, selectedSection],
   )
+  const emptySourceSections = useMemo(
+    () => outlineSections.filter((section) => section.sourceIds.length === 0),
+    [outlineSections],
+  )
+  const selectedReportRange = REPORT_DEPTH_RANGES[state.task.reportDepth]
+  const selectedDepthReason = emptySourceSections.length > 0
+    ? `有 ${emptySourceSections.length} 个章节没有来源`
+    : eligibleRealSources.length < selectedReportRange.minimumSources
+      ? `至少需要 ${selectedReportRange.minimumSources} 条有效真实资料`
+      : ''
+  const canGenerateReport = state.outlineMode === 'real'
+    && !selectedDepthReason
 
-  const handleGenerateReport = () => {
-    if (generateReport()) navigate('/report')
+  const handleGenerateReport = async () => {
+    if (await generateReport()) navigate(getTaskRoute(state.task.id, 'report'))
   }
 
   if (!state.outlineGenerated) {
@@ -70,11 +115,11 @@ export function OutlinePage() {
           </span>
           <span className="section-label mt-5 inline-block">Outline Builder</span>
           <h1 className="mt-2 text-2xl font-semibold text-ink">生成研究大纲</h1>
-          {currentTopic.usesPrototypeData && (
+          {state.outlineMode === 'mock' && (
             <PrototypeDataNotice topic={currentTopic.topic} className="mt-5 text-left" />
           )}
           <p className="mx-auto mt-3 max-w-lg text-sm leading-[22px] text-ink-muted">
-            AI 将只使用资料池中的可用来源组织章节。“无关”资料会保留在资料池，但不会参与本次大纲。
+            AI 将只使用资料池中至少 {MIN_OUTLINE_SOURCE_COUNT} 条有效来源组织章节。“无关”资料会保留在资料池，但不会参与本次大纲。
           </p>
 
           <div className="mt-7 grid grid-cols-3 gap-3 text-left">
@@ -95,19 +140,30 @@ export function OutlinePage() {
           </div>
 
           <div className="mt-7 flex flex-wrap justify-center gap-2">
-            <button type="button" onClick={() => navigate('/pool')} className="btn-secondary h-10 px-4">
+            <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'pool'))} className="btn-secondary h-10 px-4">
               返回资料池检查
             </button>
             <button
               type="button"
-              onClick={() => generateOutline()}
-              disabled={eligibleSources.length === 0}
+              onClick={() => void generateOutline()}
+              disabled={eligibleRealSources.length < MIN_OUTLINE_SOURCE_COUNT || state.outlineStatus === 'loading'}
               className="btn-primary"
             >
-              <Sparkles size={16} />
-              基于 {eligibleSources.length} 条资料生成大纲
+              {state.outlineStatus === 'loading'
+                ? <LoaderCircle size={16} className="animate-spin" />
+                : <Sparkles size={16} />}
+              基于 {eligibleRealSources.length} 条真实资料生成大纲
             </button>
           </div>
+          {state.outlineStatus === 'loading' && (
+            <p className="mt-4 text-xs text-ink-muted">{outlineProgressMessages[outlineProgressIndex]}</p>
+          )}
+          {state.outlineStatus === 'error' && state.outlineError && (
+            <div className="mt-5 rounded-lg border border-rose-200 bg-rose-50 p-4 text-left">
+              <p className="text-sm text-rose-700">{state.outlineError}</p>
+              <button type="button" onClick={useMockOutline} className="btn-secondary mt-3">使用演示大纲</button>
+            </div>
+          )}
         </section>
       </div>
     )
@@ -121,6 +177,8 @@ export function OutlinePage() {
           <div className="mt-2 flex flex-wrap items-center gap-3">
             <h1 className="text-2xl font-semibold leading-8 tracking-[-0.01em] text-ink">研究大纲</h1>
             <StatusBadge value="outlined" />
+            {state.outlineMode === 'real' && <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-primary-deep">真实大纲</span>}
+            {state.outlineMode === 'mock' && <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700">演示大纲</span>}
           </div>
           <p className="mt-1 text-sm text-ink-muted">
             基于资料池中的 {eligibleSources.length} 条可用来源自动组织，章节来源数量实时计算。
@@ -135,16 +193,127 @@ export function OutlinePage() {
             <Pencil size={15} />
             编辑大纲
           </button>
-          <button type="button" onClick={handleGenerateReport} className="btn-primary">
-            <FileText size={16} />
+          <button
+            type="button"
+            onClick={handleGenerateReport}
+            disabled={state.reportStatus === 'loading' || !canGenerateReport}
+            title={selectedDepthReason || undefined}
+            className="btn-primary"
+          >
+            {state.reportStatus === 'loading' ? <LoaderCircle size={16} className="animate-spin" /> : <FileText size={16} />}
             生成研究报告
             <ArrowRight size={14} />
           </button>
         </div>
       </section>
 
-      {currentTopic.usesPrototypeData && (
+      {state.outlineStatus === 'loading' && (
+        <section className="ai-response-block mb-5 p-4" aria-live="polite">
+          <p className="text-sm font-semibold text-ink">正在重新生成大纲</p>
+          <p className="mt-1 text-xs text-ink-muted">新大纲成功前，已有大纲和报告会继续保留。</p>
+        </section>
+      )}
+
+      {state.outlineStatus === 'error' && state.outlineError && (
+        <section className="mb-5 rounded-lg border border-rose-200 bg-rose-50 p-4" role="alert">
+          <p className="text-sm font-semibold text-rose-800">本次大纲生成失败，上次成功大纲和报告已保留。</p>
+          <p className="mt-1 text-sm text-rose-700">{state.outlineError}</p>
+          <button
+            type="button"
+            onClick={() => void generateOutline()}
+            className="btn-secondary mt-3"
+          >
+            重新生成大纲
+          </button>
+        </section>
+      )}
+
+      {state.reportStatus === 'loading' && (
+        <section className="ai-response-block mb-5 p-4" aria-live="polite">
+          <p className="text-sm font-semibold text-ink">MiMo 正在基于当前大纲撰写真实报告</p>
+          <p className="mt-2 text-xs text-ink-muted">{reportProgressMessages[reportProgressIndex]}</p>
+        </section>
+      )}
+      {state.reportStatus === 'error' && state.reportError && (
+        <section className="mb-5 rounded-lg border border-rose-200 bg-rose-50 p-4">
+          <p className="text-sm font-semibold text-rose-800">真实报告生成失败</p>
+          <p className="mt-1 text-sm text-rose-700">{state.reportError}</p>
+          <div className="mt-3 flex gap-2">
+            <button type="button" onClick={() => void handleGenerateReport()} className="btn-secondary">重新生成</button>
+            <button type="button" onClick={() => { useMockReport(); navigate(getTaskRoute(state.task.id, 'report')) }} className="btn-secondary">使用演示报告</button>
+          </div>
+        </section>
+      )}
+
+      {state.outlineMode === 'mock' && (
         <PrototypeDataNotice topic={currentTopic.topic} className="mb-5" />
+      )}
+
+      {state.outlineMode === 'real' && (
+        <section className="surface-card mb-5 p-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-base font-semibold text-ink">报告深度</h2>
+              <p className="mt-1 text-xs text-ink-subtle">
+                根据当前 {eligibleRealSources.length} 条有效真实资料选择报告长度。
+              </p>
+            </div>
+            <p className="text-xs font-medium text-primary-deep">
+              当前目标：{state.task.reportTargetMinWords}—{state.task.reportTargetMaxWords} 字
+            </p>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            {reportDepthOrder.map((depth) => {
+              const range = REPORT_DEPTH_RANGES[depth]
+              const disabled = eligibleRealSources.length < range.minimumSources
+              const selected = state.task.reportDepth === depth
+              return (
+                <button
+                  key={depth}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => setReportDepth(depth)}
+                  className={`focus-ring rounded-lg border p-4 text-left transition disabled:cursor-not-allowed disabled:opacity-55 ${
+                    selected
+                      ? 'border-blue-200 bg-primary-soft text-primary-deep'
+                      : 'border-outline bg-white text-ink-muted hover:border-slate-300'
+                  }`}
+                >
+                  <span className="block text-sm font-semibold">{range.label}</span>
+                  <span className="mt-1 block text-xs">{range.min}—{range.max} 字</span>
+                  <span className="mt-2 block text-[11px]">
+                    {disabled
+                      ? `需至少 ${range.minimumSources} 条资料，当前 ${eligibleRealSources.length} 条`
+                      : depth === 'brief'
+                        ? '一次生成'
+                        : '按章节生成后合并'}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
+          {emptySourceSections.length > 0 && (
+            <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-4">
+              <p className="text-sm font-semibold text-rose-800">存在无来源章节，暂不能生成报告</p>
+              <p className="mt-1 text-xs leading-5 text-rose-700">
+                {emptySourceSections.map((section) => section.title).join('、')}。请补充资料并重新生成大纲，或删除这些章节。
+              </p>
+              <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'pool'))} className="btn-secondary mt-3">
+                返回资料池补充来源
+              </button>
+            </div>
+          )}
+          {!emptySourceSections.length && selectedDepthReason && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4">
+              <p className="text-xs text-amber-800">
+                当前选择不可用：{selectedDepthReason}。请选择更短报告或补充资料。
+              </p>
+              <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'pool'))} className="btn-secondary">
+                返回资料池
+              </button>
+            </div>
+          )}
+        </section>
       )}
 
       <div className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
@@ -159,7 +328,8 @@ export function OutlinePage() {
             </div>
             <button
               type="button"
-              onClick={() => generateOutline()}
+              onClick={() => void generateOutline()}
+              disabled={state.outlineStatus === 'loading'}
               className="btn-secondary self-start sm:self-auto"
             >
               <RefreshCw size={14} />
@@ -174,10 +344,13 @@ export function OutlinePage() {
                 <div>
                   <h3 className="text-sm font-semibold text-ink">AI 大纲洞察</h3>
                   <p className="mt-1 text-sm leading-[22px] text-ink-muted">
-                    结构已围绕“{currentTopic.insights[0]?.title}”
-                    {currentTopic.insights[1] ? `与“${currentTopic.insights[1].title}”` : ''}
-                    组织；存疑来源仍可参与，但会在右侧关联来源中保留状态提示。
+                    {state.outlineMode === 'real' && state.liveOutline
+                      ? `${state.liveOutline.outline.title}。本大纲仅使用资料池中的有效来源，并标注各章节证据覆盖状态。`
+                      : '结构已基于当前演示资料组织；存疑来源仍可参与，并保留状态提示。'}
                   </p>
+                  {state.liveOutline?.warnings.map((warning) => (
+                    <p key={warning} className="mt-2 text-xs text-amber-700">提示：{warning}</p>
+                  ))}
                 </div>
               </div>
             </div>
@@ -230,7 +403,9 @@ export function OutlinePage() {
                     key={source.id}
                     type="button"
                     onClick={() =>
-                      navigate(`/sources/${source.id}`, { state: { from: '/pool' } })
+                      navigate(getTaskSourceRoute(state.task.id, source.id), {
+                        state: { from: getTaskRoute(state.task.id, 'outline') },
+                      })
                     }
                     className="focus-ring w-full rounded-lg border border-outline bg-white p-4 text-left transition hover:border-blue-200 hover:shadow-ambient"
                   >
@@ -259,13 +434,42 @@ export function OutlinePage() {
                 <p className="mt-1 text-xs text-ink-subtle">可返回资料池补充或调整资料判断。</p>
                 <button
                   type="button"
-                  onClick={() => navigate('/pool')}
+                  onClick={() => navigate(getTaskRoute(state.task.id, 'pool'))}
                   className="focus-ring mt-3 rounded-md text-xs font-semibold text-primary-deep hover:underline"
                 >
                   返回资料池
                 </button>
               </div>
             )}
+
+            {selectedSection
+              && selectedSection.evidenceStatus !== 'sufficient'
+              && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+                  <p className="text-sm font-semibold text-amber-900">
+                    {selectedSection.evidenceStatus === 'insufficient'
+                      ? '本章证据不足'
+                      : '本章证据有限'}
+                  </p>
+                  <p className="mt-1 text-xs leading-5 text-amber-800">
+                    当前关联 {associatedSources.length} 条来源，建议补充资料后重新生成大纲。
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" onClick={() => navigate(getTaskRoute(state.task.id, 'pool'))} className="btn-secondary">
+                      返回资料池补充来源
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void generateOutline()}
+                      disabled={state.outlineStatus === 'loading'}
+                      className="btn-secondary"
+                    >
+                      <RefreshCw size={14} />
+                      重新生成
+                    </button>
+                  </div>
+                </div>
+              )}
           </div>
         </aside>
       </div>
