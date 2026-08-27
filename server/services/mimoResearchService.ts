@@ -125,7 +125,46 @@ function firstString(record: Record<string, unknown>, keys: string[]) {
   return ''
 }
 
-function extractVerifiedSearchMetadata(payload: unknown) {
+function toVerifiedSearchMetadata(record: Record<string, unknown>) {
+  const rawUrl = firstString(record, ['url', 'page_url', 'link'])
+  const url = rawUrl ? normalizeUrl(rawUrl) : null
+  if (!url) return null
+
+  const parsedUrl = new URL(url)
+  const title = firstString(record, ['title', 'name', 'page_title'])
+  const publisher = firstString(record, ['site_name', 'publisher', 'source_name'])
+  const snippet = firstString(record, ['snippet', 'summary', 'description', 'text', 'content'])
+  const publishedAt = firstString(record, ['publish_time', 'published_at', 'publishedAt', 'date'])
+  if (!title && !publisher && !snippet) return null
+
+  return {
+    url,
+    title: title || parsedUrl.hostname,
+    publisher: publisher || parsedUrl.hostname,
+    publishedAt,
+    snippet,
+  } satisfies VerifiedSearchMetadata
+}
+
+function getFirstMessage(payload: unknown) {
+  if (!isRecord(payload) || !Array.isArray(payload.choices)) return null
+  const firstChoice = payload.choices[0]
+  if (!isRecord(firstChoice) || !isRecord(firstChoice.message)) return null
+  return firstChoice.message
+}
+
+function extractOfficialUrlCitations(payload: unknown) {
+  const message = getFirstMessage(payload)
+  if (!message || !Array.isArray(message.annotations)) return []
+
+  return message.annotations.flatMap<VerifiedSearchMetadata>((annotation) => {
+    if (!isRecord(annotation) || asString(annotation.type) !== 'url_citation') return []
+    const metadata = toVerifiedSearchMetadata(annotation)
+    return metadata ? [metadata] : []
+  })
+}
+
+function extractSearchMetadataRecursively(payload: unknown) {
   const candidates: VerifiedSearchMetadata[] = []
   const visited = new Set<unknown>()
 
@@ -139,25 +178,8 @@ function extractVerifiedSearchMetadata(payload: unknown) {
     }
 
     const record = value as Record<string, unknown>
-    const rawUrl = firstString(record, ['url', 'page_url', 'link'])
-    const url = rawUrl ? normalizeUrl(rawUrl) : null
-    if (url) {
-      const parsedUrl = new URL(url)
-      const title = firstString(record, ['title', 'name', 'page_title'])
-      const publisher = firstString(record, ['site_name', 'publisher', 'source_name'])
-      const snippet = firstString(record, ['snippet', 'summary', 'description', 'text', 'content'])
-      const publishedAt = firstString(record, ['publish_time', 'published_at', 'publishedAt', 'date'])
-
-      if (title || publisher || snippet) {
-        candidates.push({
-          url,
-          title: title || parsedUrl.hostname,
-          publisher: publisher || parsedUrl.hostname,
-          publishedAt,
-          snippet,
-        })
-      }
-    }
+    const metadata = toVerifiedSearchMetadata(record)
+    if (metadata) candidates.push(metadata)
 
     Object.entries(record).forEach(([key, child]) => {
       if (key === 'content' && typeof child === 'string') return
@@ -167,6 +189,14 @@ function extractVerifiedSearchMetadata(payload: unknown) {
   }
 
   visit(payload)
+  return candidates
+}
+
+export function extractVerifiedSearchMetadata(payload: unknown) {
+  const officialCitations = extractOfficialUrlCitations(payload)
+  const candidates = officialCitations.length > 0
+    ? officialCitations
+    : extractSearchMetadataRecursively(payload)
 
   const unique = new Map<string, VerifiedSearchMetadata>()
   candidates.forEach((candidate) => {
@@ -176,6 +206,56 @@ function extractVerifiedSearchMetadata(payload: unknown) {
   return {
     actualSourceCount: candidates.length,
     deduplicatedMetadata: [...unique.values()],
+  }
+}
+
+function summarizeResearchResponseShape(payload: Record<string, unknown>) {
+  const hasChoices = Array.isArray(payload.choices)
+  const message = getFirstMessage(payload)
+  const annotations = message && Array.isArray(message.annotations)
+    ? message.annotations
+    : []
+  const annotationTypes = [...new Set(annotations.flatMap((annotation) => {
+    if (!isRecord(annotation)) return []
+    const type = asString(annotation.type)
+    return type ? [type] : []
+  }))]
+  const annotationFields = annotations.map((annotation) => {
+    const record = isRecord(annotation) ? annotation : {}
+    return {
+      type: asString(record.type) || null,
+      hasUrl: Boolean(asString(record.url)),
+      hasTitle: Boolean(asString(record.title)),
+      hasSummary: Boolean(asString(record.summary)),
+      hasSiteName: Boolean(asString(record.site_name)),
+      hasPublishTime: Boolean(asString(record.publish_time)),
+    }
+  })
+  const toolCalls = message?.tool_calls
+  const usage = isRecord(payload.usage) ? payload.usage : null
+  const webSearchUsage = usage && isRecord(usage.web_search_usage)
+    ? usage.web_search_usage
+    : null
+
+  return {
+    hasChoices,
+    hasMessage: Boolean(message),
+    hasAnnotations: Boolean(message && Array.isArray(message.annotations)),
+    annotationCount: annotations.length,
+    annotationTypes,
+    annotationFields,
+    hasToolCalls: Array.isArray(toolCalls) ? toolCalls.length > 0 : Boolean(toolCalls),
+    usageWebSearch: webSearchUsage
+      ? {
+          toolUsage: typeof webSearchUsage.tool_usage === 'number'
+            ? webSearchUsage.tool_usage
+            : null,
+          pageUsage: typeof webSearchUsage.page_usage === 'number'
+            ? webSearchUsage.page_usage
+            : null,
+        }
+      : null,
+    topLevelKeys: Object.keys(payload).sort(),
   }
 }
 
@@ -366,6 +446,7 @@ export async function requestMimo(
         durationMs: Date.now() - startedAt,
         upstreamHttpStatus,
       })
+      console.info('[mimo:research] response shape', summarizeResearchResponseShape(payload))
     }
     return payload as MimoChatCompletionResponse
   } catch (error) {
@@ -446,6 +527,10 @@ export async function researchWithMimo(request: ResearchRequest): Promise<Resear
     actualSourceCount,
     deduplicatedMetadata,
   } = extractVerifiedSearchMetadata(payload)
+  console.info('[mimo:research] source extraction', {
+    actualSourceCount,
+    deduplicatedMetadataCount: deduplicatedMetadata.length,
+  })
   if (deduplicatedMetadata.length === 0) {
     throw new MimoServiceError('NO_REAL_SOURCES', 502, 'MiMo 未返回可验证的真实联网来源。')
   }
