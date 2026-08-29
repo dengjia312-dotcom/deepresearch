@@ -6,6 +6,7 @@ import type {
   ResearchRequest,
   ResearchResponse,
   ResearchSource,
+  ResearchSynthesisEvidence,
   VerifiedSearchMetadata,
 } from '../types/research'
 import {
@@ -17,6 +18,7 @@ const DEFAULT_BASE_URL = 'https://api.xiaomimimo.com/v1'
 const DEFAULT_MODEL = 'mimo-v2.5'
 const DEFAULT_REQUEST_TIMEOUT_MS = 45_000
 const DEFAULT_RESEARCH_REQUEST_TIMEOUT_MS = 120_000
+const SOURCE_SUMMARY_MAX_LENGTH = 600
 
 interface MimoRequestOptions {
   timeoutMs?: number
@@ -348,8 +350,8 @@ function classifySource(metadata: VerifiedSearchMetadata) {
 
 function buildResearchSources(metadata: VerifiedSearchMetadata[]): ResearchSource[] {
   return metadata.map((item, index) => {
-    const fallback = '该来源由 MiMo 联网搜索返回，请打开原文核验详细内容。'
-    const summary = item.snippet || fallback
+    const fallback = '该来源由联网检索返回，请打开原文核验详细内容。'
+    const summary = (item.snippet || fallback).slice(0, SOURCE_SUMMARY_MAX_LENGTH)
     return {
       id: `source-${index + 1}`,
       title: item.title,
@@ -618,19 +620,20 @@ export async function searchResearchSourcesWithMimo(
   throw new MimoServiceError('NO_REAL_SOURCES', 502, 'MiMo 未返回可验证的真实联网来源。')
 }
 
-function buildMimoResearchSynthesisRequestBody(
+export function buildMimoResearchSynthesisRequestBody(
   request: ResearchRequest,
-  verifiedSources: VerifiedSearchMetadata[],
+  evidenceSources: ResearchSynthesisEvidence[],
 ) {
-  const sources = verifiedSources.map((source, index) => ({
-    id: `source-${index + 1}`,
+  const sources = evidenceSources.map((source) => ({
+    sourceId: source.sourceId,
     title: source.title,
     publisher: source.publisher,
     publishedAt: source.publishedAt,
-    snippet: source.snippet,
     url: source.url,
+    evidenceType: source.evidenceType,
+    content: source.content,
   }))
-  const prompt = `请基于以下已经验证的真实来源，完成“${request.topic}”的中文研究综合。\n研究目标：${request.goal}\n\n只能使用给定来源，不得新增、猜测或改写 URL。每条洞察的 sourceUrls 只能从给定来源的 url 中选择。\n\n已验证来源：\n${JSON.stringify(sources)}\n\n仅输出 JSON，不要 Markdown，结构为：\n{"summary":"研究摘要","insights":[{"title":"洞察标题","content":"洞察正文","sourceUrls":["给定来源中的URL"]}],"warnings":[]}`
+  const prompt = `请基于以下已经验证的真实来源证据，完成“${request.topic}”的中文研究综合。\n研究目标：${request.goal}\n\n只能使用给定来源，不得联网，不得新增、猜测或改写 URL。每条洞察的 sourceUrls 只能从给定来源的 url 中选择。evidenceType 表示证据来自完整正文、部分正文或搜索摘要。\n\n已验证来源证据：\n${JSON.stringify(sources)}\n\n仅输出 JSON，不要 Markdown，结构为：\n{"summary":"研究摘要","insights":[{"title":"洞察标题","content":"洞察正文","sourceUrls":["给定来源中的URL"]}],"warnings":[]}`
 
   return {
     messages: [
@@ -649,13 +652,13 @@ function buildMimoResearchSynthesisRequestBody(
 
 export async function synthesizeResearchWithMimo(
   request: ResearchRequest,
-  verifiedSources: VerifiedSearchMetadata[],
+  evidenceSources: ResearchSynthesisEvidence[],
 ) {
   const startedAt = Date.now()
   console.info('[research:synthesis] started')
   try {
     const payload = await requestMimo(
-      buildMimoResearchSynthesisRequestBody(request, verifiedSources),
+      buildMimoResearchSynthesisRequestBody(request, evidenceSources),
       { timeoutMs: getResearchRequestTimeoutMs() },
     )
     const result = parseModelResearchPayload(getAssistantContent(payload))
@@ -673,19 +676,19 @@ export async function synthesizeResearchWithMimo(
   }
 }
 
-export async function researchWithMimo(request: ResearchRequest): Promise<ResearchResponse> {
-  const {
-    actualSourceCount,
-    deduplicatedMetadata,
-  } = await searchResearchSourcesWithMimo(request)
-
-  const selectedMetadata = deduplicatedMetadata.slice(0, request.targetSourceCount)
-  const modelResult = await synthesizeResearchWithMimo(request, selectedMetadata)
-  const sources = buildResearchSources(selectedMetadata)
+export async function synthesizeResearchResponseWithMimo(
+  request: ResearchRequest,
+  metadata: VerifiedSearchMetadata[],
+  evidenceSources: ResearchSynthesisEvidence[],
+  counts: { actualSourceCount: number; deduplicatedSourceCount: number },
+  retrievalWarnings: string[] = [],
+): Promise<ResearchResponse> {
+  const modelResult = await synthesizeResearchWithMimo(request, evidenceSources)
+  const sources = buildResearchSources(metadata)
   const { insights, hasUnlinkedInsight } = buildResearchInsights(modelResult.insights, sources)
-  const warnings = [...modelResult.warnings]
+  const warnings = [...retrievalWarnings, ...modelResult.warnings]
   if (hasUnlinkedInsight) {
-    warnings.push('部分洞察未能与 MiMo 返回的联网搜索元数据建立可靠关联，请打开来源复核。')
+    warnings.push('部分洞察未能与已验证的联网来源建立可靠关联，请打开来源复核。')
   }
   if (sources.length < request.targetSourceCount) {
     warnings.push(
@@ -704,9 +707,32 @@ export async function researchWithMimo(request: ResearchRequest): Promise<Resear
     sources,
     warnings: [...new Set(warnings)],
     targetSourceCount: request.targetSourceCount,
-    actualSourceCount,
-    deduplicatedSourceCount: deduplicatedMetadata.length,
+    actualSourceCount: counts.actualSourceCount,
+    deduplicatedSourceCount: counts.deduplicatedSourceCount,
     validSourceCount: sources.length,
     searchedAt: new Date().toISOString(),
   }
+}
+
+export async function researchWithMimo(request: ResearchRequest): Promise<ResearchResponse> {
+  const {
+    actualSourceCount,
+    deduplicatedMetadata,
+  } = await searchResearchSourcesWithMimo(request)
+  const selectedMetadata = deduplicatedMetadata.slice(0, request.targetSourceCount)
+  const evidenceSources = selectedMetadata.map<ResearchSynthesisEvidence>((source, index) => ({
+    ...source,
+    sourceId: `source-${index + 1}`,
+    evidenceType: 'search_summary',
+    content: source.snippet.slice(0, 6000),
+  }))
+  return synthesizeResearchResponseWithMimo(
+    request,
+    selectedMetadata,
+    evidenceSources,
+    {
+      actualSourceCount,
+      deduplicatedSourceCount: deduplicatedMetadata.length,
+    },
+  )
 }

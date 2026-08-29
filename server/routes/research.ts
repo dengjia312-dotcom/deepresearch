@@ -1,8 +1,8 @@
 import { Router, type Request, type Response } from 'express'
 import {
   MimoServiceError,
-  researchWithMimo,
 } from '../services/mimoResearchService'
+import { researchWithProviders } from '../services/researchService'
 import {
   completeOwnedResearch,
   failOwnedStage,
@@ -97,7 +97,7 @@ researchRouter.post(
         new Date().toISOString(),
       )
       stageStarted = true
-      const generated = await researchWithMimo(researchRequest)
+      const generated = await researchWithProviders(researchRequest)
       const persisted = toPersistedResearchResult(generated, researchRequest.topic)
       await completeOwnedResearch(
         ownerSessionId,
@@ -128,7 +128,7 @@ researchRouter.post(
         }
       }
       if (error instanceof MimoServiceError) {
-        console.error('[research] MiMo request failed', {
+        console.error('[research] provider request failed', {
           code: error.code,
           statusCode: error.statusCode,
         })

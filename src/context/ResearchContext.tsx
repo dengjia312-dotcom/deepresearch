@@ -784,6 +784,7 @@ function getResearchRequestFailure(error: unknown): ResearchRequestFailure {
     MIMO_TIMEOUT: 'MiMo 请求超时，请稍后重试。',
     MIMO_RATE_LIMITED: '请求过于频繁或套餐额度已耗尽，请稍后重试。',
     MIMO_NETWORK_ERROR: '后端暂时无法连接 MiMo API，请稍后重试。',
+    RESEARCH_SEARCH_FAILED: 'GLM 联网检索暂时失败，请稍后手动重试。',
     NO_REAL_SOURCES: '本次研究没有返回可验证的真实来源，请调整主题后重试。',
     MIMO_RESPONSE_INVALID: 'MiMo 返回的数据结构异常，请重新生成。',
   }

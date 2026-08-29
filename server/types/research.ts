@@ -89,6 +89,7 @@ export type ResearchErrorCode =
   | 'MIMO_TIMEOUT'
   | 'MIMO_NETWORK_ERROR'
   | 'MIMO_RESPONSE_INVALID'
+  | 'RESEARCH_SEARCH_FAILED'
   | 'NO_REAL_SOURCES'
   | 'MIMO_UPSTREAM_ERROR'
   | 'INTERNAL_ERROR'
@@ -122,6 +123,14 @@ export interface VerifiedSearchMetadata {
   publisher: string
   publishedAt: string
   snippet: string
+}
+
+export type ResearchEvidenceType = 'full_text' | 'partial' | 'search_summary'
+
+export interface ResearchSynthesisEvidence extends VerifiedSearchMetadata {
+  sourceId: string
+  evidenceType: ResearchEvidenceType
+  content: string
 }
 
 export type EvidenceStatus = 'sufficient' | 'limited' | 'insufficient'
