@@ -528,13 +528,13 @@ export async function testMimoConnection() {
 }
 
 export function buildMimoResearchRequestBody(request: ResearchRequest) {
-  const prompt = `请针对“${request.topic}”执行真实互联网检索并完成中文研究。\n研究目标：${request.goal}\n来源偏好：${request.sourcePreferences.join('、') || '官方网站、研究报告、学术论文、行业媒体'}\n目标检索数量：${request.targetSourceCount} 条\n\n要求：\n1. 尽量返回接近目标数量且互不重复的有效来源，优先官方机构、政府、论文、研究机构和主流媒体；\n2. 不得编造来源标题或 URL；无法确认的内容必须明确标记；\n3. 每条关键洞察必须列出支持它的真实来源 URL；\n4. 仅输出 JSON，不要 Markdown，结构为：\n{"summary":"研究摘要","insights":[{"title":"洞察标题","content":"洞察正文","sourceUrls":["搜索结果中的真实URL"]}],"warnings":[]}`
+  const prompt = `请围绕“${request.topic}”执行真实互联网检索。\n研究目标：${request.goal}\n来源偏好：${request.sourcePreferences.join('、') || '官方网站、研究报告、学术论文、行业媒体'}\n目标来源数量：${request.targetSourceCount} 条\n\n请优先查找与主题直接相关的可靠来源。只需简洁确认检索完成，不要生成复杂 JSON，不要自行构造或列出 URL；真实来源仅以 Web Search 返回的 annotations 为准。`
 
   return {
     messages: [
       {
         role: 'system',
-        content: '你是严谨的中文行业研究员。只能引用联网搜索实际返回的来源，不得补写或猜测 URL。',
+        content: '你是严谨的中文研究检索助手。请执行真实联网搜索，不得编造来源。',
       },
       { role: 'user', content: prompt },
     ],
@@ -547,6 +547,99 @@ export function buildMimoResearchRequestBody(request: ResearchRequest) {
       },
     ],
     tool_choice: 'auto',
+    max_completion_tokens: 1024,
+    temperature: 1.0,
+    stream: false,
+    thinking: { type: 'disabled' },
+  }
+}
+
+interface ResearchSearchResult {
+  actualSourceCount: number
+  deduplicatedMetadata: VerifiedSearchMetadata[]
+}
+
+function getAnnotationCount(payload: unknown) {
+  const message = getFirstMessage(payload)
+  return message && Array.isArray(message.annotations) ? message.annotations.length : 0
+}
+
+export async function searchResearchSourcesWithMimo(
+  request: ResearchRequest,
+): Promise<ResearchSearchResult> {
+  const maxAttempts = 2
+  const searchStartedAt = Date.now()
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const startedAt = Date.now()
+    console.info('[research:search] started', { attempt })
+    try {
+      const payload = await requestMimo(
+        buildMimoResearchRequestBody(request),
+        { timeoutMs: getResearchRequestTimeoutMs(), operation: 'research' },
+      )
+      if (!getFirstMessage(payload)) {
+        throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo API 返回格式异常。')
+      }
+
+      const annotationCount = getAnnotationCount(payload)
+      const {
+        actualSourceCount,
+        deduplicatedMetadata,
+      } = extractVerifiedSearchMetadata(payload)
+      console.info('[research:search] completed', {
+        attempt,
+        annotationCount,
+        actualSourceCount,
+        deduplicatedSourceCount: deduplicatedMetadata.length,
+        durationMs: Date.now() - startedAt,
+      })
+
+      if (deduplicatedMetadata.length > 0) {
+        return { actualSourceCount, deduplicatedMetadata }
+      }
+    } catch (error) {
+      console.error('[research:search] failed', {
+        attempt,
+        errorCode: error instanceof MimoServiceError ? error.code : 'INTERNAL_ERROR',
+        durationMs: Date.now() - startedAt,
+      })
+      throw error
+    }
+    if (attempt < maxAttempts) {
+      console.warn('[research:search] empty result, retrying', { attempt })
+    }
+  }
+
+  console.error('[research:search] failed', {
+    attempts: 2,
+    errorCode: 'NO_REAL_SOURCES',
+    durationMs: Date.now() - searchStartedAt,
+  })
+  throw new MimoServiceError('NO_REAL_SOURCES', 502, 'MiMo 未返回可验证的真实联网来源。')
+}
+
+function buildMimoResearchSynthesisRequestBody(
+  request: ResearchRequest,
+  verifiedSources: VerifiedSearchMetadata[],
+) {
+  const sources = verifiedSources.map((source, index) => ({
+    id: `source-${index + 1}`,
+    title: source.title,
+    publisher: source.publisher,
+    publishedAt: source.publishedAt,
+    snippet: source.snippet,
+    url: source.url,
+  }))
+  const prompt = `请基于以下已经验证的真实来源，完成“${request.topic}”的中文研究综合。\n研究目标：${request.goal}\n\n只能使用给定来源，不得新增、猜测或改写 URL。每条洞察的 sourceUrls 只能从给定来源的 url 中选择。\n\n已验证来源：\n${JSON.stringify(sources)}\n\n仅输出 JSON，不要 Markdown，结构为：\n{"summary":"研究摘要","insights":[{"title":"洞察标题","content":"洞察正文","sourceUrls":["给定来源中的URL"]}],"warnings":[]}`
+
+  return {
+    messages: [
+      {
+        role: 'system',
+        content: '你是严谨的中文行业研究员。只能使用用户提供的已验证来源，不得新增或猜测 URL。',
+      },
+      { role: 'user', content: prompt },
+    ],
     max_completion_tokens: 4096,
     temperature: 0.2,
     stream: false,
@@ -554,28 +647,41 @@ export function buildMimoResearchRequestBody(request: ResearchRequest) {
   }
 }
 
-export async function researchWithMimo(request: ResearchRequest): Promise<ResearchResponse> {
-  const payload = await requestMimo(
-    buildMimoResearchRequestBody(request),
-    { timeoutMs: getResearchRequestTimeoutMs(), operation: 'research' },
-  )
+export async function synthesizeResearchWithMimo(
+  request: ResearchRequest,
+  verifiedSources: VerifiedSearchMetadata[],
+) {
+  const startedAt = Date.now()
+  console.info('[research:synthesis] started')
+  try {
+    const payload = await requestMimo(
+      buildMimoResearchSynthesisRequestBody(request, verifiedSources),
+      { timeoutMs: getResearchRequestTimeoutMs() },
+    )
+    const result = parseModelResearchPayload(getAssistantContent(payload))
+    console.info('[research:synthesis] completed', {
+      insightCount: result.insights.length,
+      durationMs: Date.now() - startedAt,
+    })
+    return result
+  } catch (error) {
+    console.error('[research:synthesis] failed', {
+      errorCode: error instanceof MimoServiceError ? error.code : 'INTERNAL_ERROR',
+      durationMs: Date.now() - startedAt,
+    })
+    throw error
+  }
+}
 
+export async function researchWithMimo(request: ResearchRequest): Promise<ResearchResponse> {
   const {
     actualSourceCount,
     deduplicatedMetadata,
-  } = extractVerifiedSearchMetadata(payload)
-  console.info('[mimo:research] source extraction', {
-    actualSourceCount,
-    deduplicatedMetadataCount: deduplicatedMetadata.length,
-  })
-  if (deduplicatedMetadata.length === 0) {
-    throw new MimoServiceError('NO_REAL_SOURCES', 502, 'MiMo 未返回可验证的真实联网来源。')
-  }
+  } = await searchResearchSourcesWithMimo(request)
 
-  const modelResult = parseModelResearchPayload(getAssistantContent(payload))
-  const sources = buildResearchSources(
-    deduplicatedMetadata.slice(0, request.targetSourceCount),
-  )
+  const selectedMetadata = deduplicatedMetadata.slice(0, request.targetSourceCount)
+  const modelResult = await synthesizeResearchWithMimo(request, selectedMetadata)
+  const sources = buildResearchSources(selectedMetadata)
   const { insights, hasUnlinkedInsight } = buildResearchInsights(modelResult.insights, sources)
   const warnings = [...modelResult.warnings]
   if (hasUnlinkedInsight) {

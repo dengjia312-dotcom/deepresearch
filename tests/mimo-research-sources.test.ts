@@ -42,18 +42,24 @@ function officialAnnotation(url = 'https://example.com/research') {
 }
 
 async function withMockedMimoResponse(
-  payload: unknown,
+  payloadOrPayloads: unknown,
   callback: () => Promise<void>,
   captureRequest?: (body: Record<string, unknown>) => void,
 ) {
   const originalFetch = globalThis.fetch
   const originalApiKey = process.env.AI_API_KEY
+  const payloads = Array.isArray(payloadOrPayloads)
+    ? payloadOrPayloads
+    : [payloadOrPayloads]
+  let callIndex = 0
   process.env.AI_API_KEY = 'test-api-key'
   globalThis.fetch = async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as unknown
     if (captureRequest && body && typeof body === 'object' && !Array.isArray(body)) {
       captureRequest(body as Record<string, unknown>)
     }
+    const payload = payloads[Math.min(callIndex, payloads.length - 1)]
+    callIndex += 1
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -70,25 +76,32 @@ async function withMockedMimoResponse(
 }
 
 test('Research 实际请求显式启用 MiMo web_search tool choice', async () => {
-  let requestBody: Record<string, unknown> | null = null
+  const requestBodies: Record<string, unknown>[] = []
   const annotation = officialAnnotation()
-  await withMockedMimoResponse(completionPayload({
-    content: JSON.stringify({
-      summary: '研究摘要',
-      insights: [{
-        title: '研究洞察',
-        content: '洞察正文',
-        sourceUrls: [annotation.url],
-      }],
-      warnings: [],
+  await withMockedMimoResponse([
+    completionPayload({
+      content: 'search completed',
+      annotations: [annotation],
     }),
-    annotations: [annotation],
-  }), async () => {
+    completionPayload({
+      content: JSON.stringify({
+        summary: '研究摘要',
+        insights: [{
+          title: '研究洞察',
+          content: '洞察正文',
+          sourceUrls: [annotation.url],
+        }],
+        warnings: [],
+      }),
+    }),
+  ], async () => {
     await researchWithMimo(researchRequest)
   }, (body) => {
-    requestBody = body
+    requestBodies.push(body)
   })
 
+  assert.equal(requestBodies.length, 2)
+  const requestBody = requestBodies[0]
   assert.ok(requestBody)
   const tools = Array.isArray(requestBody.tools) ? requestBody.tools : []
   const webSearch = tools.find((tool) => (
@@ -100,6 +113,7 @@ test('Research 实际请求显式启用 MiMo web_search tool choice', async () =
   assert.ok(webSearch)
   assert.equal(webSearch.force_search, true)
   assert.equal(requestBody.tool_choice, 'auto')
+  assert.equal(requestBodies[1]?.tools, undefined)
 })
 
 test('官方 message.annotations url_citation 格式可提取来源', () => {

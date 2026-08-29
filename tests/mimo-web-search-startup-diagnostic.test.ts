@@ -168,7 +168,7 @@ test('诊断日志只包含安全结构摘要', async () => {
     finalSourceCount: 12,
     durationMs: logs[1]?.details.durationMs,
     errorCode: null,
-    bodyFingerprint: 'a79782fc54cd',
+    bodyFingerprint: '4f36b17ae541',
   })
   const serializedLogs = JSON.stringify(logs)
   assert.doesNotMatch(serializedLogs, /diagnostic-secret-key/)
