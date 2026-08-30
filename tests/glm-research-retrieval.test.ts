@@ -228,6 +228,25 @@ test('Reader 并发不会超过配置的 3', async () => {
   assert.equal(maxActive, 3)
 })
 
+test('Reader 每完成一个真实读取就报告一次真实分类进度', async () => {
+  const progress: GlmReaderResult['status'][] = []
+  const statuses: GlmReaderResult['status'][] = ['full_text', 'partial', 'insufficient']
+  let index = 0
+  await enrichResearchSourcesWithGlm(
+    Array.from({ length: 3 }, (_, sourceIndex) => metadata(sourceIndex + 1)),
+    {
+      concurrency: 1,
+      readSource: async () => {
+        const status = statuses[index++]!
+        const length = status === 'full_text' ? 1000 : status === 'partial' ? 300 : 10
+        return readerResult(status, 'x'.repeat(length))
+      },
+      onReaderCompleted: (status) => { progress.push(status) },
+    },
+  )
+  assert.deepEqual(progress, statuses)
+})
+
 test('每条 Reader 正文送入 Synthesis 前最多保留 6000 字符', async () => {
   const result = await enrichResearchSourcesWithGlm([metadata(1)], {
     readSource: async () => readerResult('full_text', 'x'.repeat(7000)),

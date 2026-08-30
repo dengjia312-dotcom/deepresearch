@@ -14,6 +14,11 @@ import type {
   ResearchPoolItem,
   ResearchTask,
 } from '../../src/types'
+import type {
+  ResearchJobPhase,
+  ResearchJobProgress,
+  ResearchJobStatus,
+} from '../types/researchJob'
 
 export type ResearchStage = 'plan' | 'research' | 'outline' | 'report'
 
@@ -45,6 +50,10 @@ export interface PersistedResearchStateDto {
   outlineVersion: number
   reportConfigVersion: number
   revision: number
+  researchJobId: string | null
+  researchJobStatus: ResearchJobStatus | null
+  researchJobPhase: ResearchJobPhase | null
+  researchJobProgress: ResearchJobProgress | null
 }
 
 export interface TaskDetailDto {

@@ -156,6 +156,39 @@ export interface LiveResearchResponse {
   searchedAt: string
 }
 
+export type ResearchJobStatus = 'queued' | 'running' | 'completed' | 'failed'
+export type ResearchJobPhase =
+  | 'queued'
+  | 'searching'
+  | 'reading'
+  | 'synthesizing'
+  | 'completed'
+  | 'failed'
+
+export interface ResearchJobProgress {
+  validSourceCount: number
+  readerTargetCount: number
+  readerCompletedCount: number
+  fullTextCount: number
+  partialCount: number
+  insufficientCount: number
+  readerFailedCount: number
+}
+
+export interface ResearchJobResponse {
+  jobId: string
+  taskId: string
+  requestId: string
+  status: ResearchJobStatus
+  phase: ResearchJobPhase
+  progress: ResearchJobProgress
+  result: LiveResearchResponse | null
+  error: { code: string; message: string; status: number | null } | null
+  createdAt: string
+  updatedAt: string
+  completedAt: string | null
+}
+
 export interface ResearchHealthResponse {
   status: 'ok'
   mimoConfigured: boolean
@@ -288,6 +321,59 @@ export async function requestLiveResearch(
   })
   if (!response.ok) await parseError(response)
   return response.json() as Promise<LiveResearchResponse>
+}
+
+export async function requestCreateResearchJob(
+  request: LiveResearchRequest,
+  signal?: AbortSignal,
+) {
+  const response = await fetch('/api/research/jobs', {
+    method: 'POST',
+    headers: createApiHeaders(),
+    body: JSON.stringify(request),
+    signal,
+  })
+  if (!response.ok) await parseError(response)
+  return response.json() as Promise<{ jobId: string; status: ResearchJobStatus }>
+}
+
+export async function requestResearchJob(jobId: string, signal?: AbortSignal) {
+  const response = await fetch(`/api/research/jobs/${encodeURIComponent(jobId)}`, {
+    headers: createApiHeaders(),
+    signal,
+  })
+  if (!response.ok) await parseError(response)
+  return response.json() as Promise<ResearchJobResponse>
+}
+
+export async function pollResearchJob(
+  jobId: string,
+  options: {
+    signal?: AbortSignal
+    intervalMs?: number
+    onUpdate?: (job: ResearchJobResponse) => void
+    request?: typeof requestResearchJob
+  } = {},
+) {
+  const intervalMs = options.intervalMs ?? 2_000
+  const request = options.request ?? requestResearchJob
+  while (!options.signal?.aborted) {
+    const job = await request(jobId, options.signal)
+    options.onUpdate?.(job)
+    if (job.status === 'completed' || job.status === 'failed') return job
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer)
+        reject(new DOMException('Polling aborted', 'AbortError'))
+      }
+      const timer = setTimeout(() => {
+        options.signal?.removeEventListener('abort', onAbort)
+        resolve()
+      }, intervalMs)
+      options.signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+  throw new DOMException('Polling aborted', 'AbortError')
 }
 
 export async function requestLiveOutline(

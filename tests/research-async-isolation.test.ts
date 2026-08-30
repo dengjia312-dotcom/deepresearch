@@ -147,6 +147,40 @@ test('任务 A/B 请求乱序返回时各自写回所属任务', () => {
   assert.equal(workspace.tasksById['task-B'].liveResearchResult?.summary, 'B摘要')
 })
 
+test('Research Job loading 状态持久化后可恢复轮询且不影响其他任务', () => {
+  let workspace = createWorkspace('task-A', 'task-B')
+  workspace = updateTask(workspace, 'task-A', {
+    type: 'START_LIVE_SEARCH', taskId: 'task-A', requestId: 'A-job-r1', startedAt: 'A-start',
+  })
+  workspace = updateTask(workspace, 'task-A', {
+    type: 'RESEARCH_JOB_UPDATED',
+    taskId: 'task-A',
+    requestId: 'A-job-r1',
+    jobId: '11111111-1111-4111-8111-111111111111',
+    status: 'running',
+    phase: 'reading',
+    progress: {
+      validSourceCount: 10,
+      readerTargetCount: 8,
+      readerCompletedCount: 3,
+      fullTextCount: 2,
+      partialCount: 1,
+      insufficientCount: 0,
+      readerFailedCount: 0,
+    },
+  })
+  const taskA = workspace.tasksById['task-A']!
+  const restored = researchWorkspaceTestApi.restorePersistedResearchState(
+    researchWorkspaceTestApi.persistResearchState(taskA),
+  )
+  assert.ok(restored)
+  assert.equal(restored.searchStatus, 'loading')
+  assert.equal(restored.requests.research.requestId, 'A-job-r1')
+  assert.equal(restored.researchJobPhase, 'reading')
+  assert.equal(restored.researchJobProgress?.readerCompletedCount, 3)
+  assert.equal(workspace.tasksById['task-B']?.researchJobId, null)
+})
+
 test('同一任务同一操作仅接受最新 requestId', () => {
   let workspace = createWorkspace('task-A')
   workspace = updateTask(workspace, 'task-A', {

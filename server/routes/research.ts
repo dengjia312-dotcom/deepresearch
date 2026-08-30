@@ -28,7 +28,7 @@ function sendError(
   response.status(statusCode).json({ error: { code, message } })
 }
 
-function parseResearchRequest(body: unknown): ResearchRequest | null {
+export function parseResearchRequest(body: unknown): ResearchRequest | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null
   const candidate = body as Record<string, unknown>
   const taskId = typeof candidate.taskId === 'string' ? candidate.taskId.trim() : ''
@@ -71,6 +71,7 @@ function parseResearchRequest(body: unknown): ResearchRequest | null {
 
 researchRouter.post(
   '/',
+  // Legacy synchronous endpoint. The production frontend creates asynchronous jobs instead.
   async (
     request: Request<unknown, ResearchResponse | ResearchErrorResponse, unknown>,
     response: Response<ResearchResponse | ResearchErrorResponse>,

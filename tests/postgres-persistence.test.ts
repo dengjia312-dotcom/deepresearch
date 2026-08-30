@@ -20,6 +20,16 @@ import {
   updateOwnedPoolItem,
 } from '../server/db/repositories/taskRepository'
 import { InvalidCitationError, StaleTaskWriteError, TaskNotFoundError, TaskOwnershipConflictError } from '../server/db/errors'
+import {
+  completeResearchJob,
+  createOrReuseOwnedResearchJob,
+  getOwnedResearchJob,
+  incrementResearchJobReaderProgress,
+  markResearchJobRunning,
+  recoverInterruptedResearchJobs,
+  setResearchJobPhase,
+} from '../server/db/repositories/researchJobRepository'
+import type { ResearchRequest, ResearchResponse } from '../server/types/research'
 import type {
   LiveOutlineResult,
   LiveReportResult,
@@ -126,6 +136,40 @@ function researchResult(items: Source[]): LiveResearchResult {
   }
 }
 
+function jobRequest(taskId: string, requestId = `request-${randomUUID()}`): ResearchRequest {
+  return {
+    taskId,
+    requestId,
+    topic: 'PostgreSQL persistence test',
+    goal: 'Research job persistence',
+    sourcePreferences: ['行业研究'],
+    targetSourceCount: 12,
+  }
+}
+
+function jobResponse(input: ResearchRequest): ResearchResponse {
+  return {
+    taskId: input.taskId,
+    requestId: input.requestId,
+    mode: 'live',
+    dataSource: 'real',
+    topic: input.topic,
+    summary: 'summary',
+    insights: [],
+    sources: [{
+      id: 'source-a', title: 'Source A', url: 'https://example.com/source-a',
+      publisher: 'Publisher', publishedAt: '2026-08-30', type: 'web',
+      credibility: '待评估', summary: 'summary', keyInsight: 'insight',
+    }],
+    warnings: [],
+    targetSourceCount: 12,
+    actualSourceCount: 1,
+    deduplicatedSourceCount: 1,
+    validSourceCount: 1,
+    searchedAt: new Date().toISOString(),
+  }
+}
+
 function outlineResult(sourceId: string): LiveOutlineResult {
   return {
     mode: 'live', dataSource: 'real', warnings: [], generatedAt: new Date().toISOString(),
@@ -198,7 +242,93 @@ pgTest('2. migration 可重复执行', async () => {
   await runDatabaseMigrations(pool)
   await runDatabaseMigrations(pool)
   const rows = await pool.query('SELECT * FROM schema_migrations')
-  assert.equal(rows.rowCount, 1)
+  assert.equal(rows.rowCount, 2)
+})
+
+pgTest('Research Job 同 task/request 幂等且只归所属 session 可读', async () => {
+  const ownerId = await owner()
+  const otherOwnerId = await owner()
+  const detail = await created(ownerId)
+  const input = jobRequest(detail.state.task.id)
+  const first = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
+  const duplicate = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
+  assert.equal(first.created, true)
+  assert.equal(duplicate.created, false)
+  assert.equal(duplicate.job.jobId, first.job.jobId)
+  await assert.rejects(
+    () => getOwnedResearchJob(otherOwnerId, first.job.jobId, pool),
+    TaskNotFoundError,
+  )
+})
+
+pgTest('Research Job 保存真实阶段进度并与任务结果原子完成', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const input = jobRequest(detail.state.task.id)
+  const createdJob = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
+  await markResearchJobRunning(createdJob.job.jobId, pool)
+  await setResearchJobPhase(createdJob.job.jobId, 'searching', { validSourceCount: 7 }, pool)
+  await setResearchJobPhase(createdJob.job.jobId, 'reading', { readerTargetCount: 2 }, pool)
+  await incrementResearchJobReaderProgress(createdJob.job.jobId, 'full_text', pool)
+  await incrementResearchJobReaderProgress(createdJob.job.jobId, 'partial', pool)
+  await setResearchJobPhase(createdJob.job.jobId, 'synthesizing', {}, pool)
+  const apiResult = jobResponse(input)
+  const persisted = researchResult([source('source-a')])
+  const completed = await completeResearchJob(
+    ownerId,
+    createdJob.job.jobId,
+    persisted,
+    apiResult,
+    pool,
+  )
+  assert.equal(completed.status, 'completed')
+  assert.equal(completed.progress.readerCompletedCount, 2)
+  assert.equal(completed.progress.fullTextCount, 1)
+  assert.equal(completed.progress.partialCount, 1)
+  assert.deepEqual(completed.result, apiResult)
+  const restored = await getOwnedTaskDetail(ownerId, detail.state.task.id, pool)
+  assert.equal(restored.state.searchStatus, 'success')
+  assert.equal(restored.state.researchJobId, createdJob.job.jobId)
+  assert.deepEqual(restored.state.liveResearchResult, persisted)
+})
+
+pgTest('旧 requestId Job 完成不能覆盖更新请求', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const oldRequest = jobRequest(detail.state.task.id, 'old-request')
+  const oldJob = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), oldRequest, pool)
+  await markResearchJobRunning(oldJob.job.jobId, pool)
+  const newRequest = jobRequest(detail.state.task.id, 'new-request')
+  await createOrReuseOwnedResearchJob(ownerId, randomUUID(), newRequest, pool)
+  await assert.rejects(
+    () => completeResearchJob(
+      ownerId,
+      oldJob.job.jobId,
+      researchResult([source('old-source')]),
+      jobResponse(oldRequest),
+      pool,
+    ),
+    StaleTaskWriteError,
+  )
+  const restored = await getOwnedTaskDetail(ownerId, detail.state.task.id, pool)
+  assert.equal(restored.state.requests.research.requestId, 'new-request')
+  assert.equal(restored.state.liveResearchResult, null)
+})
+
+pgTest('服务重启把 queued/running Job 标记为可重试失败', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const input = jobRequest(detail.state.task.id)
+  const createdJob = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
+  await markResearchJobRunning(createdJob.job.jobId, pool)
+  assert.equal(await recoverInterruptedResearchJobs(pool), 1)
+  const recovered = await getOwnedResearchJob(ownerId, createdJob.job.jobId, pool)
+  assert.equal(recovered.status, 'failed')
+  assert.equal(recovered.phase, 'failed')
+  assert.equal(recovered.error?.code, 'RESEARCH_JOB_INTERRUPTED')
+  const restored = await getOwnedTaskDetail(ownerId, detail.state.task.id, pool)
+  assert.equal(restored.state.searchStatus, 'error')
+  assert.equal(restored.state.requests.research.lastErrorCode, 'RESEARCH_JOB_INTERRUPTED')
 })
 
 pgTest('3. 原始 sessionId 不进入数据库', async () => {

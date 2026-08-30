@@ -25,12 +25,7 @@ import {
   useResearch,
 } from '../context/ResearchContext'
 
-const liveProgressSteps = [
-  '正在理解研究问题',
-  '正在检索互联网来源',
-  '正在整理研究洞察',
-  '正在生成研究摘要',
-] as const
+const liveProgressPhases = ['queued', 'searching', 'reading', 'synthesizing'] as const
 
 export function SearchResultsPage() {
   const navigate = useNavigate()
@@ -46,7 +41,6 @@ export function SearchResultsPage() {
   } = useResearch()
   const [searchTerm, setSearchTerm] = useState(state.task.title)
   const [activeFilter, setActiveFilter] = useState('全部')
-  const [activeProgressStep, setActiveProgressStep] = useState(0)
   const [showAllSources, setShowAllSources] = useState(false)
 
   useEffect(() => {
@@ -58,17 +52,6 @@ export function SearchResultsPage() {
   useEffect(() => {
     setShowAllSources(false)
   }, [state.searchedAt])
-
-  useEffect(() => {
-    if (state.searchStatus !== 'loading') {
-      setActiveProgressStep(0)
-      return
-    }
-    const timer = window.setInterval(() => {
-      setActiveProgressStep((step) => Math.min(step + 1, liveProgressSteps.length - 1))
-    }, 6500)
-    return () => window.clearInterval(timer)
-  }, [state.searchStatus])
 
   const filteredSources = useMemo(() => {
     const byKind = activeFilter === '全部'
@@ -115,6 +98,23 @@ export function SearchResultsPage() {
     && (state.searchMode === 'real' || state.searchMode === 'mock')
   ) || hasPreservedLiveResult
   const hasCompletedLiveSearch = Boolean(state.liveResearchResult)
+  const progress = state.researchJobProgress
+  const currentProgressPhase = state.researchJobPhase ?? 'queued'
+  const activeProgressStep = Math.max(0, liveProgressPhases.indexOf(
+    currentProgressPhase === 'completed' || currentProgressPhase === 'failed'
+      ? 'synthesizing'
+      : currentProgressPhase,
+  ))
+  const liveProgressSteps = [
+    '正在准备研究任务',
+    progress?.validSourceCount
+      ? `已找到 ${progress.validSourceCount} 条有效来源`
+      : '正在检索真实互联网来源',
+    progress?.readerTargetCount
+      ? `正在深度阅读网页 ${progress.readerCompletedCount} / ${progress.readerTargetCount}`
+      : '正在准备深度阅读网页',
+    `正在基于 ${progress?.validSourceCount ?? 0} 条真实来源进行综合分析`,
+  ]
 
   if (!state.researchPlan) return <Navigate to="/" replace />
   if (!state.researchPlan.confirmedAt) {
@@ -213,7 +213,7 @@ export function SearchResultsPage() {
           <span className="section-label mt-5">Live Research</span>
           <h2 className="mt-2 text-xl font-semibold text-ink">准备开始真实联网研究</h2>
           <p className="mt-2 max-w-xl text-sm leading-6 text-ink-muted">
-            将根据当前研究计划中的目标与来源偏好调用 MiMo 联网搜索。进入页面或刷新页面不会自动发起请求。
+            将根据当前研究计划中的目标与来源偏好执行 GLM 检索与网页阅读，再由 MiMo 综合分析。进入页面或刷新页面不会自动发起新任务。
           </p>
           <p className="mt-2 text-xs font-medium text-primary-deep">
             本次目标检索 {state.task.targetSourceCount} 条
@@ -234,7 +234,7 @@ export function SearchResultsPage() {
           <LoaderCircle size={30} className="animate-spin text-primary" />
           <span className="section-label mt-5">Live Research in progress</span>
           <h2 className="mt-2 text-xl font-semibold text-ink">正在进行真实联网研究</h2>
-          <p className="mt-2 text-sm text-ink-muted">联网研究通常需要 10～45 秒，请保持当前页面打开。</p>
+          <p className="mt-2 text-sm text-ink-muted">任务已在后端执行，可以刷新页面或切换任务，返回后会继续恢复进度。</p>
           <div className="mt-7 w-full max-w-lg space-y-2.5">
             {liveProgressSteps.map((step, index) => {
               const completed = index < activeProgressStep
@@ -262,6 +262,12 @@ export function SearchResultsPage() {
               )
             })}
           </div>
+          {currentProgressPhase === 'reading' && progress && (
+            <p className="mt-5 text-xs leading-5 text-ink-subtle">
+              全文来源 {progress.fullTextCount} · 部分内容 {progress.partialCount} ·
+              内容不足 {progress.insufficientCount} · 读取失败 {progress.readerFailedCount}
+            </p>
+          )}
         </section>
       )}
 

@@ -28,6 +28,11 @@ import type {
   TaskSummaryDto,
 } from '../types'
 import { toAsyncRequestState } from '../types'
+import type {
+  ResearchJobPhase,
+  ResearchJobProgress,
+  ResearchJobStatus,
+} from '../../types/researchJob'
 
 type Queryable = Pool | PoolClient
 
@@ -68,6 +73,13 @@ interface StageRow extends QueryResultRow {
   pool_version: number | null
   outline_version: number | null
   report_config_version: number | null
+}
+
+interface ResearchJobProjectionRow extends QueryResultRow {
+  id: string
+  status: ResearchJobStatus
+  phase: ResearchJobPhase
+  progress: ResearchJobProgress
 }
 
 function toIso(value: Date | string | null | undefined) {
@@ -202,6 +214,15 @@ async function getOwnedTaskDetailFromDatabase(
       source_id: string
       citation_order: number
     }>('SELECT * FROM report_citations WHERE task_id = $1 ORDER BY citation_order', [taskId])
+  const researchJobResult = await database.query<ResearchJobProjectionRow>(`
+    SELECT j.id, j.status, j.phase, j.progress
+    FROM research_jobs j
+    JOIN research_task_stages s
+      ON s.task_id = j.task_id AND s.stage = 'research' AND s.request_id = j.request_id
+    WHERE j.task_id = $1 AND j.owner_session_id = $2
+    ORDER BY j.created_at DESC
+    LIMIT 1
+  `, [taskId, ownerSessionId])
   const stageMap = new Map(stagesResult.rows.map((stage) => [stage.stage, toStageData(stage)]))
   const plan = stageMap.get('plan') ?? toStageData(undefined)
   const research = stageMap.get('research') ?? toStageData(undefined)
@@ -249,6 +270,10 @@ async function getOwnedTaskDetailFromDatabase(
     outlineVersion: task.outline_version,
     reportConfigVersion: task.report_config_version,
     revision: task.revision,
+    researchJobId: researchJobResult.rows[0]?.id ?? null,
+    researchJobStatus: researchJobResult.rows[0]?.status ?? null,
+    researchJobPhase: researchJobResult.rows[0]?.phase ?? null,
+    researchJobProgress: researchJobResult.rows[0]?.progress ?? null,
   }
   return {
     state,
@@ -310,6 +335,41 @@ export async function createOwnedTask(
   }, pool)
 }
 
+export async function startOwnedStageWithClient(
+  client: PoolClient,
+  ownerSessionId: string,
+  taskId: string,
+  stage: ResearchStage,
+  requestId: string,
+  startedAt: string,
+  versions: StageStartVersions = {},
+) {
+  const task = await selectOwnedTask(client, ownerSessionId, taskId, true)
+  if (
+    (versions.poolVersion !== undefined && task.pool_version !== versions.poolVersion)
+    || (versions.outlineVersion !== undefined && task.outline_version !== versions.outlineVersion)
+    || (versions.reportConfigVersion !== undefined
+      && task.report_config_version !== versions.reportConfigVersion)
+  ) throw new StaleTaskWriteError()
+  await client.query(`
+      UPDATE research_task_stages
+      SET mode = 'real', status = 'loading', request_id = $3,
+          started_at = $4, completed_at = NULL, failed_at = NULL,
+          last_error_message = NULL, last_error_code = NULL, last_error_status = NULL,
+          pool_version = $5, outline_version = $6, report_config_version = $7,
+          updated_at = now()
+      WHERE task_id = $1 AND stage = $2
+  `, [
+    taskId,
+    stage,
+    requestId,
+    startedAt,
+    versions.poolVersion ?? null,
+    versions.outlineVersion ?? null,
+    versions.reportConfigVersion ?? null,
+  ])
+}
+
 export async function startOwnedStage(
   ownerSessionId: string,
   taskId: string,
@@ -319,32 +379,18 @@ export async function startOwnedStage(
   versions: StageStartVersions = {},
   pool: Pool = getDatabasePool(),
 ) {
-  return withTransaction(async (client) => {
-    const task = await selectOwnedTask(client, ownerSessionId, taskId, true)
-    if (
-      (versions.poolVersion !== undefined && task.pool_version !== versions.poolVersion)
-      || (versions.outlineVersion !== undefined && task.outline_version !== versions.outlineVersion)
-      || (versions.reportConfigVersion !== undefined
-        && task.report_config_version !== versions.reportConfigVersion)
-    ) throw new StaleTaskWriteError()
-    await client.query(`
-      UPDATE research_task_stages
-      SET mode = 'real', status = 'loading', request_id = $3,
-          started_at = $4, completed_at = NULL, failed_at = NULL,
-          last_error_message = NULL, last_error_code = NULL, last_error_status = NULL,
-          pool_version = $5, outline_version = $6, report_config_version = $7,
-          updated_at = now()
-      WHERE task_id = $1 AND stage = $2
-    `, [
+  return withTransaction(
+    (client) => startOwnedStageWithClient(
+      client,
+      ownerSessionId,
       taskId,
       stage,
       requestId,
       startedAt,
-      versions.poolVersion ?? null,
-      versions.outlineVersion ?? null,
-      versions.reportConfigVersion ?? null,
-    ])
-  }, pool)
+      versions,
+    ),
+    pool,
+  )
 }
 
 async function assertLatestStage(
@@ -382,6 +428,32 @@ async function markStageSuccess(
   `, [taskId, stage, completedAt])
 }
 
+export async function failOwnedStageWithClient(
+  client: PoolClient,
+  ownerSessionId: string,
+  taskId: string,
+  stage: ResearchStage,
+  requestId: string,
+  failure: StageFailureInput,
+) {
+  await selectOwnedTask(client, ownerSessionId, taskId, true)
+  const result = await client.query(`
+      UPDATE research_task_stages
+      SET status = 'error', last_error_message = $4, last_error_code = $5,
+          last_error_status = $6, failed_at = $7, updated_at = now()
+      WHERE task_id = $1 AND stage = $2 AND request_id = $3 AND status = 'loading'
+  `, [
+    taskId,
+    stage,
+    requestId,
+    failure.errorMessage,
+    failure.errorCode,
+    failure.errorStatus,
+    failure.failedAt,
+  ])
+  if (result.rowCount !== 1) throw new StaleTaskWriteError()
+}
+
 export async function failOwnedStage(
   ownerSessionId: string,
   taskId: string,
@@ -390,24 +462,17 @@ export async function failOwnedStage(
   failure: StageFailureInput,
   pool: Pool = getDatabasePool(),
 ) {
-  return withTransaction(async (client) => {
-    await selectOwnedTask(client, ownerSessionId, taskId, true)
-    const result = await client.query(`
-      UPDATE research_task_stages
-      SET status = 'error', last_error_message = $4, last_error_code = $5,
-          last_error_status = $6, failed_at = $7, updated_at = now()
-      WHERE task_id = $1 AND stage = $2 AND request_id = $3 AND status = 'loading'
-    `, [
+  return withTransaction(
+    (client) => failOwnedStageWithClient(
+      client,
+      ownerSessionId,
       taskId,
       stage,
       requestId,
-      failure.errorMessage,
-      failure.errorCode,
-      failure.errorStatus,
-      failure.failedAt,
-    ])
-    if (result.rowCount !== 1) throw new StaleTaskWriteError()
-  }, pool)
+      failure,
+    ),
+    pool,
+  )
 }
 
 export async function completeOwnedPlan(
@@ -451,6 +516,27 @@ export async function completeOwnedPlan(
   }, pool)
 }
 
+export async function completeOwnedResearchWithClient(
+  client: PoolClient,
+  ownerSessionId: string,
+  taskId: string,
+  requestId: string,
+  result: LiveResearchResult,
+) {
+  await assertLatestStage(client, ownerSessionId, taskId, 'research', requestId)
+  await client.query(`
+      INSERT INTO research_results(task_id, payload, searched_at, created_at, updated_at)
+      VALUES ($1, $2, $3, now(), now())
+      ON CONFLICT (task_id) DO UPDATE
+      SET payload = EXCLUDED.payload, searched_at = EXCLUDED.searched_at, updated_at = now()
+  `, [taskId, result, result.searchedAt])
+  await client.query(`
+      UPDATE research_tasks SET revision = revision + 1, updated_at = now()
+      WHERE task_id = $1
+  `, [taskId])
+  await markStageSuccess(client, taskId, 'research', result.searchedAt)
+}
+
 export async function completeOwnedResearch(
   ownerSessionId: string,
   taskId: string,
@@ -459,18 +545,13 @@ export async function completeOwnedResearch(
   pool: Pool = getDatabasePool(),
 ) {
   return withTransaction(async (client) => {
-    await assertLatestStage(client, ownerSessionId, taskId, 'research', requestId)
-    await client.query(`
-      INSERT INTO research_results(task_id, payload, searched_at, created_at, updated_at)
-      VALUES ($1, $2, $3, now(), now())
-      ON CONFLICT (task_id) DO UPDATE
-      SET payload = EXCLUDED.payload, searched_at = EXCLUDED.searched_at, updated_at = now()
-    `, [taskId, result, result.searchedAt])
-    await client.query(`
-      UPDATE research_tasks SET revision = revision + 1, updated_at = now()
-      WHERE task_id = $1
-    `, [taskId])
-    await markStageSuccess(client, taskId, 'research', result.searchedAt)
+    await completeOwnedResearchWithClient(
+      client,
+      ownerSessionId,
+      taskId,
+      requestId,
+      result,
+    )
     return getOwnedTaskDetailFromDatabase(client, ownerSessionId, taskId)
   }, pool)
 }

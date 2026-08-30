@@ -23,7 +23,8 @@ import {
   requestLivePlan,
   requestLiveOutline,
   requestLiveReport,
-  requestLiveResearch,
+  pollResearchJob,
+  requestCreateResearchJob,
   requestAddPoolItem,
   requestCreateTask,
   requestImportV4,
@@ -38,6 +39,9 @@ import {
   type LiveOutlineResponse,
   type LiveReportResponse,
   type LiveResearchResponse,
+  type ResearchJobPhase,
+  type ResearchJobProgress,
+  type ResearchJobStatus,
   type SelectedSourceRequest,
 } from '../services/researchApi'
 import type {
@@ -86,6 +90,28 @@ function createIdleRequestStates(): AsyncRequestStates {
   }
 }
 
+function createEmptyResearchJobProgress(): ResearchJobProgress {
+  return {
+    validSourceCount: 0,
+    readerTargetCount: 0,
+    readerCompletedCount: 0,
+    fullTextCount: 0,
+    partialCount: 0,
+    insufficientCount: 0,
+    readerFailedCount: 0,
+  }
+}
+
+function normalizeResearchJobProgress(value: unknown): ResearchJobProgress | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const candidate = value as Partial<ResearchJobProgress>
+  const empty = createEmptyResearchJobProgress()
+  for (const key of Object.keys(empty) as Array<keyof ResearchJobProgress>) {
+    if (!Number.isSafeInteger(candidate[key]) || (candidate[key] ?? -1) < 0) return null
+  }
+  return { ...empty, ...candidate }
+}
+
 function createRequestState(
   status: GenerationStatus = 'idle',
   error: Partial<Pick<AsyncRequestState, 'lastErrorCode' | 'lastErrorStatus' | 'failedAt'>> = {},
@@ -115,7 +141,18 @@ function restoreRequestState(
       : {})
   }
   const candidate = value as Partial<AsyncRequestState>
-  return createRequestState(status, {
+  return {
+    requestId: interrupted
+      ? null
+      : typeof candidate.requestId === 'string'
+        ? candidate.requestId
+        : null,
+    status,
+    startedAt: interrupted
+      ? null
+      : typeof candidate.startedAt === 'string'
+        ? candidate.startedAt
+        : null,
     lastErrorCode: interrupted
       ? 'REQUEST_INTERRUPTED'
       : typeof candidate.lastErrorCode === 'string'
@@ -129,7 +166,7 @@ function restoreRequestState(
       : typeof candidate.failedAt === 'string'
         ? candidate.failedAt
         : null,
-  })
+  }
 }
 
 interface FailureActionMetadata {
@@ -149,6 +186,10 @@ export interface ResearchState {
   liveResearchResult: LiveResearchResult | null
   searchError: string | null
   searchedAt: string | null
+  researchJobId: string | null
+  researchJobStatus: ResearchJobStatus | null
+  researchJobPhase: ResearchJobPhase | null
+  researchJobProgress: ResearchJobProgress | null
   outlineMode: GenerationMode
   outlineStatus: GenerationStatus
   outlineError: string | null
@@ -195,6 +236,15 @@ type ResearchAction =
     }
   | { type: 'CONFIRM_PLAN'; confirmedAt: string }
   | { type: 'START_LIVE_SEARCH'; taskId: string; requestId: string; startedAt: string }
+  | {
+      type: 'RESEARCH_JOB_UPDATED'
+      taskId: string
+      requestId: string
+      jobId: string
+      status: ResearchJobStatus
+      phase: ResearchJobPhase
+      progress: ResearchJobProgress
+    }
   | { type: 'LIVE_SEARCH_SUCCESS'; taskId: string; requestId: string; result: LiveResearchResult }
   | ({
       type: 'LIVE_SEARCH_ERROR'
@@ -298,6 +348,10 @@ const defaultState: ResearchState = {
   liveResearchResult: null,
   searchError: null,
   searchedAt: null,
+  researchJobId: null,
+  researchJobStatus: null,
+  researchJobPhase: null,
+  researchJobProgress: null,
   outlineMode: 'idle',
   outlineStatus: 'idle',
   outlineError: null,
@@ -328,6 +382,10 @@ interface PersistedResearchState {
   liveResearchResult?: LiveResearchResult | null
   searchError?: string | null
   searchedAt?: string | null
+  researchJobId?: string | null
+  researchJobStatus?: ResearchJobStatus | null
+  researchJobPhase?: ResearchJobPhase | null
+  researchJobProgress?: ResearchJobProgress | null
   outlineMode?: GenerationMode
   outlineStatus?: GenerationStatus
   outlineError?: string | null
@@ -785,6 +843,7 @@ function getResearchRequestFailure(error: unknown): ResearchRequestFailure {
     MIMO_RATE_LIMITED: '请求过于频繁或套餐额度已耗尽，请稍后重试。',
     MIMO_NETWORK_ERROR: '后端暂时无法连接 MiMo API，请稍后重试。',
     RESEARCH_SEARCH_FAILED: 'GLM 联网检索暂时失败，请稍后手动重试。',
+    RESEARCH_JOB_INTERRUPTED: '研究任务因服务中断未完成，请重新发起研究。',
     NO_REAL_SOURCES: '本次研究没有返回可验证的真实来源，请调整主题后重试。',
     MIMO_RESPONSE_INVALID: 'MiMo 返回的数据结构异常，请重新生成。',
   }
@@ -822,6 +881,10 @@ function restoreTaskState(
     poolVersion?: number
     outlineVersion?: number
     reportConfigVersion?: number
+    researchJobId?: string | null
+    researchJobStatus?: ResearchJobStatus | null
+    researchJobPhase?: ResearchJobPhase | null
+    researchJobProgress?: ResearchJobProgress | null
   },
 ): ResearchState {
   const topic = resolveResearchTopic(task.topicId, task.title || task.query)
@@ -905,8 +968,14 @@ function restoreTaskState(
         : 'idle'
   const planWasInterrupted = storedSearch?.planStatus === 'loading'
     || storedSearch?.requests?.plan.status === 'loading'
-  const searchWasInterrupted = storedSearch?.status === 'loading'
+  const hasActiveResearchJob = Boolean(
+    storedSearch?.researchJobId
+    && (storedSearch.researchJobStatus === 'queued' || storedSearch.researchJobStatus === 'running'),
+  )
+  const searchWasInterrupted = !hasActiveResearchJob && (
+    storedSearch?.status === 'loading'
     || storedSearch?.requests?.research.status === 'loading'
+  )
   const outlineWasInterrupted = storedSearch?.outlineStatus === 'loading'
     || storedSearch?.requests?.outline.status === 'loading'
   const reportWasInterrupted = storedSearch?.reportStatus === 'loading'
@@ -926,7 +995,9 @@ function restoreTaskState(
     : storedSearchMode === 'mock'
       ? 'mock'
       : 'idle'
-  const searchStatus: SearchStatus = searchWasInterrupted || storedSearch?.status === 'error'
+  const searchStatus: SearchStatus = hasActiveResearchJob
+    ? 'loading'
+    : searchWasInterrupted || storedSearch?.status === 'error'
     ? 'error'
     : searchMode === 'real' && restoredLiveResult
       ? 'success'
@@ -1037,6 +1108,12 @@ function restoreTaskState(
     searchedAt: searchMode === 'real'
       ? storedSearch?.searchedAt ?? restoredLiveResult?.searchedAt ?? null
       : null,
+    researchJobId: typeof storedSearch?.researchJobId === 'string'
+      ? storedSearch.researchJobId
+      : null,
+    researchJobStatus: storedSearch?.researchJobStatus ?? null,
+    researchJobPhase: storedSearch?.researchJobPhase ?? null,
+    researchJobProgress: normalizeResearchJobProgress(storedSearch?.researchJobProgress),
     outlineMode,
     outlineStatus,
     outlineError: outlineWasInterrupted
@@ -1119,6 +1196,10 @@ function restorePersistedResearchState(value: unknown): ResearchState | null {
       poolVersion: parsed.poolVersion,
       outlineVersion: parsed.outlineVersion,
       reportConfigVersion: parsed.reportConfigVersion,
+      researchJobId: typeof parsed.researchJobId === 'string' ? parsed.researchJobId : null,
+      researchJobStatus: parsed.researchJobStatus,
+      researchJobPhase: parsed.researchJobPhase,
+      researchJobProgress: normalizeResearchJobProgress(parsed.researchJobProgress),
     },
   )
 }
@@ -1333,6 +1414,10 @@ function researchReducer(state: ResearchState, action: ResearchAction): Research
         liveResearchResult: null,
         searchError: null,
         searchedAt: null,
+        researchJobId: null,
+        researchJobStatus: null,
+        researchJobPhase: null,
+        researchJobProgress: null,
         outlineMode: 'idle',
         outlineStatus: 'idle',
         outlineError: null,
@@ -1384,6 +1469,10 @@ function researchReducer(state: ResearchState, action: ResearchAction): Research
         liveResearchResult: null,
         searchError: null,
         searchedAt: null,
+        researchJobId: null,
+        researchJobStatus: null,
+        researchJobPhase: null,
+        researchJobProgress: null,
         outlineMode: 'idle',
         outlineStatus: 'idle',
         outlineError: null,
@@ -1526,6 +1615,10 @@ function researchReducer(state: ResearchState, action: ResearchAction): Research
         searchMode: 'real',
         searchStatus: 'loading',
         searchError: null,
+        researchJobId: null,
+        researchJobStatus: 'queued',
+        researchJobPhase: 'queued',
+        researchJobProgress: createEmptyResearchJobProgress(),
         requests: setRequestState(state.requests, 'research', {
           requestId: action.requestId,
           status: 'loading',
@@ -1535,6 +1628,19 @@ function researchReducer(state: ResearchState, action: ResearchAction): Research
           failedAt: null,
         }),
         notice: null,
+      }
+    case 'RESEARCH_JOB_UPDATED':
+      if (
+        state.task.id !== action.taskId
+        || !isLatestRequest(state, 'research', action.requestId)
+        || (state.researchJobId && state.researchJobId !== action.jobId)
+      ) return state
+      return {
+        ...state,
+        researchJobId: action.jobId,
+        researchJobStatus: action.status,
+        researchJobPhase: action.phase,
+        researchJobProgress: action.progress,
       }
     case 'LIVE_SEARCH_SUCCESS':
       if (
@@ -1549,6 +1655,8 @@ function researchReducer(state: ResearchState, action: ResearchAction): Research
         liveResearchResult: action.result,
         searchError: null,
         searchedAt: action.result.searchedAt,
+        researchJobStatus: 'completed',
+        researchJobPhase: 'completed',
         requests: setRequestState(state.requests, 'research', {
           status: 'success',
           lastErrorCode: null,
@@ -1568,6 +1676,8 @@ function researchReducer(state: ResearchState, action: ResearchAction): Research
         searchMode: 'real',
         searchStatus: 'error',
         searchError: action.message,
+        researchJobStatus: 'failed',
+        researchJobPhase: 'failed',
         requests: setFailedRequestState(state.requests, 'research', action),
         notice: null,
       }
@@ -1578,6 +1688,10 @@ function researchReducer(state: ResearchState, action: ResearchAction): Research
         searchStatus: 'success',
         searchError: null,
         searchedAt: null,
+        researchJobId: null,
+        researchJobStatus: null,
+        researchJobPhase: null,
+        researchJobProgress: null,
         requests: {
           ...state.requests,
           research: createRequestState('success'),
@@ -1922,7 +2036,11 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
 }
 
 function persistResearchState(state: ResearchState): PersistedResearchState {
-  const interruptedSearch = state.searchStatus === 'loading'
+  const hasActiveResearchJob = Boolean(
+    state.researchJobId
+    && (state.researchJobStatus === 'queued' || state.researchJobStatus === 'running'),
+  )
+  const interruptedSearch = state.searchStatus === 'loading' && !hasActiveResearchJob
   const interruptedOutline = state.outlineStatus === 'loading'
   const interruptedReport = state.reportStatus === 'loading'
   const persistedAt = new Date().toISOString()
@@ -1942,6 +2060,10 @@ function persistResearchState(state: ResearchState): PersistedResearchState {
       ? '联网研究被刷新中断，请重新发起。'
       : state.searchError,
     searchedAt: state.searchedAt,
+    researchJobId: state.researchJobId,
+    researchJobStatus: state.researchJobStatus,
+    researchJobPhase: state.researchJobPhase,
+    researchJobProgress: state.researchJobProgress,
     outlineMode: state.outlineMode,
     outlineStatus: interruptedOutline ? 'error' : state.outlineStatus,
     outlineError: interruptedOutline
@@ -1961,18 +2083,30 @@ function persistResearchState(state: ResearchState): PersistedResearchState {
       (Object.keys(state.requests) as AsyncResearchOperation[]).map((operation) => [
         operation,
         {
-          requestId: null,
-          status: state.requests[operation].status === 'loading'
+          requestId: operation === 'research' && hasActiveResearchJob
+            ? state.requests[operation].requestId
+            : null,
+          status: operation === 'research' && hasActiveResearchJob
+            ? 'loading'
+            : state.requests[operation].status === 'loading'
             ? 'error'
             : state.requests[operation].status,
-          startedAt: null,
-          lastErrorCode: state.requests[operation].status === 'loading'
+          startedAt: operation === 'research' && hasActiveResearchJob
+            ? state.requests[operation].startedAt
+            : null,
+          lastErrorCode: operation === 'research' && hasActiveResearchJob
+            ? null
+            : state.requests[operation].status === 'loading'
             ? 'REQUEST_INTERRUPTED'
             : state.requests[operation].lastErrorCode,
-          lastErrorStatus: state.requests[operation].status === 'loading'
+          lastErrorStatus: operation === 'research' && hasActiveResearchJob
+            ? null
+            : state.requests[operation].status === 'loading'
             ? null
             : state.requests[operation].lastErrorStatus,
-          failedAt: state.requests[operation].status === 'loading'
+          failedAt: operation === 'research' && hasActiveResearchJob
+            ? null
+            : state.requests[operation].status === 'loading'
             ? persistedAt
             : state.requests[operation].failedAt,
         },
@@ -2193,6 +2327,11 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
   )
   const latestRequestsRef = useRef(new Map<string, string>())
   const mutationChainsRef = useRef(new Map<string, Promise<void>>())
+  const researchPollersRef = useRef(new Map<string, {
+    jobId: string
+    controller: AbortController
+    promise: Promise<boolean>
+  }>())
   const workspaceRef = useRef(workspace)
   workspaceRef.current = workspace
   const activeTaskIdRef = useRef(workspace.activeTaskId)
@@ -2219,6 +2358,135 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
     })
     return next
   }, [])
+
+  const startResearchJobPolling = useCallback((
+    taskId: string,
+    requestId: string,
+    jobId: string,
+    targetSourceCount: number,
+    topic: string,
+  ) => {
+    const existing = researchPollersRef.current.get(taskId)
+    if (existing?.jobId === jobId) return existing.promise
+    existing?.controller.abort()
+    const controller = new AbortController()
+    const requestKey = getRequestKey(taskId, 'research')
+    latestRequestsRef.current.set(requestKey, requestId)
+    const promise = (async () => {
+      try {
+        const job = await pollResearchJob(jobId, {
+          signal: controller.signal,
+          intervalMs: 2_000,
+          onUpdate: (updated) => {
+            if (latestRequestsRef.current.get(requestKey) !== requestId) {
+              controller.abort()
+              return
+            }
+            if (
+              updated.jobId !== jobId
+              || updated.taskId !== taskId
+              || updated.requestId !== requestId
+            ) return
+            dispatchToTask(taskId, {
+              type: 'RESEARCH_JOB_UPDATED',
+              taskId,
+              requestId,
+              jobId,
+              status: updated.status,
+              phase: updated.phase,
+              progress: updated.progress,
+            })
+          },
+        })
+        if (latestRequestsRef.current.get(requestKey) !== requestId) return false
+        if (job.taskId !== taskId || job.requestId !== requestId || job.jobId !== jobId) {
+          dispatchToTask(taskId, {
+            type: 'LIVE_SEARCH_ERROR',
+            taskId,
+            requestId,
+            targetSourceCount,
+            ...createResearchRequestFailure(
+              'Research Job 返回的任务或请求标识不匹配，请重新发起研究。',
+              'RESPONSE_ID_MISMATCH',
+            ),
+          })
+          return false
+        }
+        if (job.status === 'failed') {
+          dispatchToTask(taskId, {
+            type: 'LIVE_SEARCH_ERROR',
+            taskId,
+            requestId,
+            targetSourceCount,
+            ...createResearchRequestFailure(
+              job.error?.message ?? '联网研究失败，请重新发起当前步骤。',
+              job.error?.code ?? 'INTERNAL_ERROR',
+              job.error?.status ?? null,
+            ),
+          })
+          return false
+        }
+        if (!job.result) {
+          dispatchToTask(taskId, {
+            type: 'LIVE_SEARCH_ERROR',
+            taskId,
+            requestId,
+            targetSourceCount,
+            ...createResearchRequestFailure(
+              'Research Job 已完成，但没有返回有效研究结果。',
+              'MIMO_RESPONSE_INVALID',
+            ),
+          })
+          return false
+        }
+        const result = sanitizeLiveResearchResult(job.result, topic)
+        if (!result || result.targetSourceCount !== targetSourceCount) {
+          dispatchToTask(taskId, {
+            type: 'LIVE_SEARCH_ERROR',
+            taskId,
+            requestId,
+            targetSourceCount,
+            ...createResearchRequestFailure(
+              '联网研究没有返回可展示的有效来源或结构化结果。',
+              'MIMO_RESPONSE_INVALID',
+            ),
+          })
+          return false
+        }
+        dispatchToTask(taskId, {
+          type: 'LIVE_SEARCH_SUCCESS',
+          taskId,
+          requestId,
+          result,
+        })
+        return shouldNavigateAfterRequest(
+          activeTaskIdRef.current,
+          taskId,
+          latestRequestsRef.current.get(requestKey),
+          requestId,
+        )
+      } catch (error) {
+        if (controller.signal.aborted) return false
+        if (latestRequestsRef.current.get(requestKey) !== requestId) return false
+        dispatchToTask(taskId, {
+          type: 'LIVE_SEARCH_ERROR',
+          taskId,
+          requestId,
+          targetSourceCount,
+          ...getResearchRequestFailure(error),
+        })
+        return false
+      } finally {
+        const current = researchPollersRef.current.get(taskId)
+        if (current?.jobId === jobId) researchPollersRef.current.delete(taskId)
+        if (latestRequestsRef.current.get(requestKey) === requestId) {
+          latestRequestsRef.current.delete(requestKey)
+        }
+      }
+    })()
+    researchPollersRef.current.set(taskId, { jobId, controller, promise })
+    return promise
+  }, [dispatchToTask])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -2260,6 +2528,31 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
     }
     void hydrate()
     return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (isHydrating) return
+    for (const taskId of workspace.taskOrder) {
+      const taskState = workspace.tasksById[taskId]
+      const requestId = taskState?.requests.research.requestId
+      if (
+        !taskState?.researchJobId
+        || !requestId
+        || (taskState.researchJobStatus !== 'queued' && taskState.researchJobStatus !== 'running')
+      ) continue
+      void startResearchJobPolling(
+        taskId,
+        requestId,
+        taskState.researchJobId,
+        taskState.task.targetSourceCount,
+        taskState.task.title,
+      )
+    }
+  }, [isHydrating, startResearchJobPolling, workspace.taskOrder, workspace.tasksById])
+
+  useEffect(() => () => {
+    for (const poller of researchPollersRef.current.values()) poller.controller.abort()
+    researchPollersRef.current.clear()
   }, [])
   const hasTask = useCallback(
     (taskId: string) => Boolean(workspace.tasksById[taskId]),
@@ -2670,7 +2963,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
       startedAt,
     })
     try {
-      const response = await requestLiveResearch({
+      const job = await requestCreateResearchJob({
         taskId,
         requestId,
         topic: state.task.title,
@@ -2679,44 +2972,21 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
         targetSourceCount: state.task.targetSourceCount,
       })
       if (latestRequestsRef.current.get(requestKey) !== requestId) return false
-      if (response.taskId !== taskId || response.requestId !== requestId) {
-        dispatchToTask(taskId, {
-          type: 'LIVE_SEARCH_ERROR',
-          taskId,
-          requestId,
-          targetSourceCount: state.task.targetSourceCount,
-          ...createResearchRequestFailure(
-            '联网研究返回的任务或请求标识不匹配，请重新发起。',
-            'RESPONSE_ID_MISMATCH',
-          ),
-        })
-        return false
-      }
-      const result = sanitizeLiveResearchResult(response, state.task.title)
-      if (!result || result.targetSourceCount !== state.task.targetSourceCount) {
-        dispatchToTask(taskId, {
-          type: 'LIVE_SEARCH_ERROR',
-          taskId,
-          requestId,
-          targetSourceCount: state.task.targetSourceCount,
-          ...createResearchRequestFailure(
-            '联网研究没有返回可展示的有效来源或结构化结果。',
-            'MIMO_RESPONSE_INVALID',
-          ),
-        })
-        return false
-      }
       dispatchToTask(taskId, {
-        type: 'LIVE_SEARCH_SUCCESS',
+        type: 'RESEARCH_JOB_UPDATED',
         taskId,
         requestId,
-        result,
+        jobId: job.jobId,
+        status: job.status,
+        phase: 'queued',
+        progress: createEmptyResearchJobProgress(),
       })
-      return shouldNavigateAfterRequest(
-        activeTaskIdRef.current,
+      return await startResearchJobPolling(
         taskId,
-        latestRequestsRef.current.get(requestKey),
         requestId,
+        job.jobId,
+        state.task.targetSourceCount,
+        state.task.title,
       )
     } catch (error) {
       if (latestRequestsRef.current.get(requestKey) !== requestId) return false
@@ -2727,13 +2997,10 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
         targetSourceCount: state.task.targetSourceCount,
         ...getResearchRequestFailure(error),
       })
+      latestRequestsRef.current.delete(requestKey)
       return false
-    } finally {
-      if (latestRequestsRef.current.get(requestKey) === requestId) {
-        latestRequestsRef.current.delete(requestKey)
-      }
     }
-  }, [dispatchToTask, state.researchPlan, state.task.id, state.task.targetSourceCount, state.task.title])
+  }, [dispatchToTask, startResearchJobPolling, state.researchPlan, state.task.id, state.task.targetSourceCount, state.task.title])
 
   const useMockResearch = useCallback(() => {
     dispatchToTask(state.task.id, { type: 'USE_MOCK_SEARCH' })
@@ -3218,7 +3485,10 @@ export function useResearch() {
 
 export const researchWorkspaceTestApi = {
   initWorkspaceState,
+  persistResearchState,
   persistWorkspaceState,
+  restorePersistedResearchState,
+  researchReducer,
   shouldNavigateAfterRequest,
   workspaceReducer,
 }

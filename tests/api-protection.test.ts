@@ -7,6 +7,7 @@ import {
   ApiProtectionStore,
   concurrencyKey,
   createApiProtectionMiddleware,
+  createResearchJobPollingProtectionMiddleware,
   getApiProtectionConfig,
   type ApiOperation,
   type ApiProtectionConfig,
@@ -108,6 +109,35 @@ test('缺少或非法 sessionId 时拒绝 API 请求', () => {
   assert.equal(missing.response.statusCode, 400)
   assert.equal(invalid.response.statusCode, 400)
   assert.equal(missing.nextCalled, false)
+})
+
+test('Research Job polling 使用独立轻量额度且不消耗 Research 创建额度', () => {
+  const config = createConfig()
+  const store = new ApiProtectionStore(config.cleanupIntervalMs)
+  const middleware = createResearchJobPollingProtectionMiddleware(store, {
+    API_RESEARCH_JOB_POLL_SESSION_LIMIT: '2',
+    API_RESEARCH_JOB_POLL_IP_LIMIT: '10',
+    API_RESEARCH_JOB_POLL_WINDOW_MS: '60000',
+  })
+  const invokePoll = () => {
+    const request = new FakeRequest({}, '127.0.0.1', sessionId(1))
+    const response = new FakeResponse()
+    let nextCalled = false
+    middleware(
+      request as unknown as Request,
+      response as unknown as Response,
+      (() => { nextCalled = true }) as NextFunction,
+    )
+    return { response, nextCalled }
+  }
+  assert.equal(invokePoll().nextCalled, true)
+  assert.equal(invokePoll().nextCalled, true)
+  const limited = invokePoll()
+  assert.equal(limited.response.statusCode, 429)
+  assert.ok(limited.response.headers.has('retry-after'))
+  const research = invoke('research', config, store, { sessionId: sessionId(1) })
+  assert.equal(research.nextCalled, true)
+  research.response.emit('finish')
 })
 
 test('同 task 同 operation 的第二个并发请求返回 429', () => {

@@ -4,11 +4,13 @@ import express, { type NextFunction, type Request, type Response } from 'express
 import {
   ApiProtectionStore,
   createApiProtectionMiddleware,
+  createResearchJobPollingProtectionMiddleware,
   getApiProtectionConfig,
   getConfiguredTrustProxy,
 } from './middleware/apiProtection'
 import { planRouter } from './routes/plan'
 import { researchRouter } from './routes/research'
+import { researchJobsRouter } from './routes/researchJobs'
 import { outlineRouter } from './routes/outline'
 import { reportRouter } from './routes/report'
 import { tasksRouter } from './routes/tasks'
@@ -17,6 +19,7 @@ import type { ResearchErrorResponse } from './types/research'
 import { sessionOwnerMiddleware } from './middleware/sessionOwner'
 import { runDatabaseMigrations } from './db/migrate'
 import { recoverInterruptedStages } from './db/repositories/taskRepository'
+import { recoverInterruptedResearchJobs } from './db/repositories/researchJobRepository'
 import { closeDatabasePool } from './db/pool'
 import { startMimoWebSearchStartupDiagnostic } from './services/mimoWebSearchStartupDiagnostic'
 
@@ -24,6 +27,13 @@ const app = express()
 const port = Number.parseInt(process.env.PORT ?? '3001', 10) || 3001
 const apiProtectionConfig = getApiProtectionConfig()
 const apiProtectionStore = new ApiProtectionStore(apiProtectionConfig.cleanupIntervalMs)
+const researchProtectionMiddleware = createApiProtectionMiddleware(
+  'research',
+  { config: apiProtectionConfig, store: apiProtectionStore },
+)
+const researchJobPollingProtectionMiddleware = createResearchJobPollingProtectionMiddleware(
+  apiProtectionStore,
+)
 const trustProxy = getConfiguredTrustProxy()
 
 app.disable('x-powered-by')
@@ -43,8 +53,16 @@ app.get('/api/health', (_request, response) => {
 app.use('/api/tasks', sessionOwnerMiddleware, tasksRouter)
 
 app.use(
+  '/api/research/jobs',
+  (request, response, next) => request.method === 'GET'
+    ? researchJobPollingProtectionMiddleware(request, response, next)
+    : researchProtectionMiddleware(request, response, next),
+  sessionOwnerMiddleware,
+  researchJobsRouter,
+)
+app.use(
   '/api/research',
-  createApiProtectionMiddleware('research', { config: apiProtectionConfig, store: apiProtectionStore }),
+  researchProtectionMiddleware,
   sessionOwnerMiddleware,
   researchRouter,
 )
@@ -89,6 +107,7 @@ app.use(
 
 async function startServer() {
   await runDatabaseMigrations()
+  await recoverInterruptedResearchJobs()
   await recoverInterruptedStages()
   app.listen(port, '0.0.0.0', () => {
     const { apiKey, baseUrl, configured, model } = getMimoConfiguration()

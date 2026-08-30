@@ -311,6 +311,46 @@ export function createApiProtectionMiddleware(
   }
 }
 
+export function createResearchJobPollingProtectionMiddleware(
+  store: ApiProtectionStore,
+  environment: NodeJS.ProcessEnv = process.env,
+  now: () => number = Date.now,
+): RequestHandler {
+  const windowMs = getPositiveInteger(environment, 'API_RESEARCH_JOB_POLL_WINDOW_MS', 60_000)
+  const sessionLimit = getPositiveInteger(environment, 'API_RESEARCH_JOB_POLL_SESSION_LIMIT', 120)
+  const ipLimit = getPositiveInteger(environment, 'API_RESEARCH_JOB_POLL_IP_LIMIT', 600)
+  return (request: Request, response: Response<ResearchErrorResponse>, next: NextFunction) => {
+    const sessionId = request.get(SESSION_HEADER)?.trim() ?? ''
+    if (!isValidSessionId(sessionId)) {
+      sendProtectionError(response, 400, 'INVALID_REQUEST', '缺少有效的匿名会话标识。')
+      return
+    }
+    const rateResult = store.tryConsumeRates([
+      {
+        key: JSON.stringify(['rate', 'session', sessionId, 'research-job-poll']),
+        limit: sessionLimit,
+        windowMs,
+      },
+      {
+        key: JSON.stringify(['rate', 'ip', getRequestIp(request), 'research-job-poll']),
+        limit: ipLimit,
+        windowMs,
+      },
+    ], now())
+    if (!rateResult.allowed) {
+      sendProtectionError(
+        response,
+        429,
+        'API_RATE_LIMITED',
+        'Research Job 状态查询过于频繁，请稍后重试。',
+        rateResult.retryAfterSeconds,
+      )
+      return
+    }
+    next()
+  }
+}
+
 export function getConfiguredTrustProxy(
   environment: NodeJS.ProcessEnv = process.env,
 ): false | number | string | string[] {

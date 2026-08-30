@@ -70,6 +70,13 @@ interface SearchMappingResult {
 interface ReaderDependencies {
   concurrency?: number
   readSource?: typeof readResearchSourceWithGlm
+  onReaderCompleted?: (status: GlmReaderStatus) => Promise<void> | void
+}
+
+export interface GlmResearchProgressHooks {
+  onSearchCompleted?: (validSourceCount: number) => Promise<void> | void
+  onReaderStarted?: (readerTargetCount: number) => Promise<void> | void
+  onReaderCompleted?: (status: GlmReaderStatus) => Promise<void> | void
 }
 
 function getPositiveInteger(name: string, fallback: number) {
@@ -367,6 +374,7 @@ export async function enrichResearchSourcesWithGlm(
       const currentIndex = nextIndex
       nextIndex += 1
       results[currentIndex] = await readSource(readerTargets[currentIndex]!.url)
+      await dependencies.onReaderCompleted?.(results[currentIndex]!.status)
     }
   }
 
@@ -423,9 +431,14 @@ export async function enrichResearchSourcesWithGlm(
 
 export async function retrieveResearchSourcesWithGlm(
   request: ResearchRequest,
+  hooks: GlmResearchProgressHooks = {},
 ): Promise<GlmResearchRetrievalResult> {
   const search = await searchResearchSourcesWithGlm(request)
-  const reader = await enrichResearchSourcesWithGlm(search.metadata)
+  await hooks.onSearchCompleted?.(search.metadata.length)
+  await hooks.onReaderStarted?.(Math.min(MAX_READER_SOURCES, search.metadata.length))
+  const reader = await enrichResearchSourcesWithGlm(search.metadata, {
+    onReaderCompleted: hooks.onReaderCompleted,
+  })
   return {
     ...search,
     evidenceSources: reader.evidenceSources,
