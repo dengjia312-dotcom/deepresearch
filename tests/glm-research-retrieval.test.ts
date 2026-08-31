@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   enrichResearchSourcesWithGlm,
   glmResearchRetrievalTestApi,
+  readResearchSourceWithGlm,
   searchResearchSourcesWithGlm,
   type GlmReaderResult,
 } from '../server/services/glmResearchRetrievalService'
@@ -156,6 +157,76 @@ test('GLM Search URL 去重会忽略 fragment', () => {
   assert.ok(result)
   assert.equal(result.validSourceCount, 2)
   assert.equal(result.deduplicatedMetadata.length, 1)
+})
+
+test('Reader HTTP 403、429 和 5xx 使用安全失败分类', async () => {
+  for (const [status, category] of [[403, 'HTTP_4XX'], [429, 'HTTP_4XX'], [503, 'HTTP_5XX']] as const) {
+    await withMockedProviders(async () => new Response('{}', {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    }), async () => {
+      const result = await readResearchSourceWithGlm('https://reader.example.com/article')
+      assert.equal(result.status, 'unavailable')
+      assert.equal(result.httpStatus, status)
+      assert.equal(result.failureCategory, category)
+    })
+  }
+})
+
+test('Reader timeout、network 和 invalid response 使用安全失败分类', async () => {
+  const cases: Array<[() => Promise<Response>, string]> = [
+    [async () => { throw new DOMException('aborted', 'AbortError') }, 'TIMEOUT'],
+    [async () => { throw new TypeError('network unavailable') }, 'NETWORK'],
+    [async () => new Response('{}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }), 'INVALID_RESPONSE'],
+  ]
+  for (const [fetchImpl, category] of cases) {
+    await withMockedProviders(fetchImpl, async () => {
+      const result = await readResearchSourceWithGlm('https://reader.example.com/article')
+      assert.equal(result.status, 'unavailable')
+      assert.equal(result.failureCategory, category)
+    })
+  }
+})
+
+test('Reader 空正文归类 EMPTY_CONTENT 且继续使用 Search Summary', async () => {
+  await withMockedProviders(async () => new Response(JSON.stringify({
+    reader_result: { content: '' },
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  }), async () => {
+    const reader = await readResearchSourceWithGlm('https://reader.example.com/article')
+    assert.equal(reader.status, 'insufficient')
+    assert.equal(reader.failureCategory, 'EMPTY_CONTENT')
+    const result = await enrichResearchSourcesWithGlm([metadata(1)], {
+      readSource: async () => reader,
+    })
+    assert.equal(result.readerStats.failureCategories.EMPTY_CONTENT, 1)
+    assert.equal(result.evidenceSources[0]?.evidenceType, 'search_summary')
+  })
+})
+
+test('Reader 失败聚合状态码并继续使用 Search Summary fallback', async () => {
+  const sources = [metadata(1), metadata(2), metadata(3)]
+  const failures: GlmReaderResult[] = [
+    { status: 'unavailable', content: '', contentLength: 0, httpStatus: 403, failureCategory: 'HTTP_4XX' },
+    { status: 'unavailable', content: '', contentLength: 0, httpStatus: 500, failureCategory: 'HTTP_5XX' },
+    { status: 'unavailable', content: '', contentLength: 0, httpStatus: null, failureCategory: 'TIMEOUT' },
+  ]
+  let index = 0
+  const result = await enrichResearchSourcesWithGlm(sources, {
+    readSource: async () => failures[index++]!,
+  })
+  assert.equal(result.readerStats.failedCount, 3)
+  assert.equal(result.readerStats.searchSummaryCount, 3)
+  assert.equal(result.readerStats.failureCategories.HTTP_4XX, 1)
+  assert.equal(result.readerStats.failureCategories.HTTP_5XX, 1)
+  assert.equal(result.readerStats.failureCategories.TIMEOUT, 1)
+  assert.deepEqual(result.readerStats.httpStatusCounts, { '403': 1, '500': 1 })
+  assert.ok(result.evidenceSources.every((source) => source.evidenceType === 'search_summary'))
 })
 
 test('Reader content >= 1000 判定为 full_text', () => {

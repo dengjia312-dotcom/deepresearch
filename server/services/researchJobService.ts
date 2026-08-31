@@ -1,5 +1,7 @@
 import type { ResearchRequest, ResearchResponse } from '../types/research'
 import { ResearchServiceError } from './serviceError'
+import { StaleTaskWriteError } from '../db/errors'
+import type { ResearchJobFailurePoint } from '../types/researchJob'
 import { toPersistedResearchResult } from './persistenceTransform'
 import { researchWithProviders, type ResearchExecutionHooks } from './researchService'
 import {
@@ -38,6 +40,7 @@ export async function executeResearchJob(
   dependencies: ResearchJobExecutionDependencies = {},
 ) {
   const startedAt = Date.now()
+  let failurePoint: ResearchJobFailurePoint = 'job_start'
   const research = dependencies.research ?? researchWithProviders
   const markRunning = dependencies.markRunning ?? markResearchJobRunning
   const setPhase = dependencies.setPhase ?? setResearchJobPhase
@@ -46,6 +49,7 @@ export async function executeResearchJob(
   const fail = dependencies.fail ?? failResearchJob
   try {
     await markRunning(job.jobId)
+    failurePoint = 'research_execute'
     console.info('[research-job] phase', { jobId: job.jobId, phase: 'searching' })
     const response = await research(job.request, {
       onSearchCompleted: async (validSourceCount) => {
@@ -60,9 +64,17 @@ export async function executeResearchJob(
       },
       onSynthesisStarted: async () => {
         await setPhase(job.jobId, 'synthesizing')
+        failurePoint = 'synthesis_parse'
         console.info('[research-job] phase', { jobId: job.jobId, phase: 'synthesizing' })
       },
+      onSynthesisParsed: () => {
+        failurePoint = 'response_build'
+      },
+      onResponseBuilt: () => {
+        failurePoint = 'persist_task'
+      },
     })
+    failurePoint = 'persist_task'
     await complete(
       job.ownerSessionId,
       job.jobId,
@@ -75,27 +87,57 @@ export async function executeResearchJob(
       sourceCount: response.sources.length,
     })
   } catch (error) {
-    const failure = error instanceof ResearchServiceError
+    const persistenceFailurePoint = getPersistenceFailurePoint(error)
+    if (persistenceFailurePoint) failurePoint = persistenceFailurePoint
+    const failure = error instanceof StaleTaskWriteError
+      ? {
+          code: 'STALE_TASK_WRITE',
+          message: '该研究任务已被更新的请求替代，结果未写入当前任务。',
+          status: 409,
+        }
+      : error instanceof ResearchServiceError
       ? { code: error.code, message: error.publicMessage, status: error.statusCode }
       : {
           code: 'INTERNAL_ERROR',
           message: '研究任务执行或保存失败，请重新发起研究。',
           status: 500,
         }
+    const originalFailurePoint = failurePoint
     try {
+      failurePoint = 'persist_job_failed'
       await fail(job.ownerSessionId, job.jobId, failure)
     } catch (persistenceError) {
       console.error('[research-job] failure persistence failed', {
         jobId: job.jobId,
-        name: persistenceError instanceof Error ? persistenceError.name : 'UnknownError',
+        taskId: job.request.taskId,
+        requestId: job.request.requestId,
+        failurePoint,
+        errorName: persistenceError instanceof Error ? persistenceError.name : 'UnknownError',
+        databaseErrorCode: getSafeDatabaseErrorCode(persistenceError),
       })
     }
     console.error('[research-job] failed', {
       jobId: job.jobId,
+      taskId: job.request.taskId,
+      requestId: job.request.requestId,
+      failurePoint: originalFailurePoint,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
       errorCode: failure.code,
       durationMs: Date.now() - startedAt,
     })
   }
+}
+
+function getPersistenceFailurePoint(error: unknown): ResearchJobFailurePoint | null {
+  if (!error || typeof error !== 'object') return null
+  const value = Reflect.get(error, 'researchJobFailurePoint')
+  return value === 'persist_task' || value === 'persist_job_complete' ? value : null
+}
+
+function getSafeDatabaseErrorCode(error: unknown) {
+  if (!error || typeof error !== 'object') return null
+  const value = Reflect.get(error, 'code')
+  return typeof value === 'string' && /^[0-9A-Z]{5}$/.test(value) ? value : null
 }
 
 export class ResearchJobScheduler {

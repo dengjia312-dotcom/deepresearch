@@ -35,12 +35,21 @@ interface GlmJsonResponse {
 }
 
 export type GlmReaderStatus = 'full_text' | 'partial' | 'insufficient' | 'unavailable'
+export type GlmReaderFailureCategory =
+  | 'HTTP_4XX'
+  | 'HTTP_5XX'
+  | 'TIMEOUT'
+  | 'NETWORK'
+  | 'INVALID_RESPONSE'
+  | 'EMPTY_CONTENT'
+  | 'UNKNOWN'
 
 export interface GlmReaderResult {
   status: GlmReaderStatus
   content: string
   contentLength: number
   httpStatus: number | null
+  failureCategory?: GlmReaderFailureCategory | null
 }
 
 export interface GlmReaderStats {
@@ -51,6 +60,8 @@ export interface GlmReaderStats {
   failedCount: number
   searchSummaryCount: number
   averageContentLength: number
+  failureCategories: Record<GlmReaderFailureCategory, number>
+  httpStatusCounts: Record<string, number>
 }
 
 export interface GlmResearchRetrievalResult {
@@ -121,6 +132,8 @@ async function requestGlmJson(
       'RESEARCH_SEARCH_FAILED',
       503,
       'GLM API 尚未配置。',
+      undefined,
+      'GLM_NOT_CONFIGURED',
     )
   }
 
@@ -131,6 +144,7 @@ async function requestGlmJson(
       503,
       '当前 AI 服务请求较多，请稍后手动重试。',
       getAiConcurrencyRetryAfterSeconds(),
+      'LOCAL_CONCURRENCY_LIMITED',
     )
   }
 
@@ -155,6 +169,8 @@ async function requestGlmJson(
           'RESEARCH_SEARCH_FAILED',
           502,
           'GLM API 返回格式异常。',
+          undefined,
+          'GLM_RESPONSE_INVALID',
         )
       }
     }
@@ -167,6 +183,8 @@ async function requestGlmJson(
       'RESEARCH_SEARCH_FAILED',
       timedOut ? 504 : 502,
       timedOut ? 'GLM API 请求超时。' : '无法连接 GLM API。',
+      undefined,
+      timedOut ? 'GLM_TIMEOUT' : 'GLM_NETWORK_ERROR',
     )
   } finally {
     clearTimeout(timeout)
@@ -301,6 +319,20 @@ function classifyReaderContent(contentLength: number): GlmReaderStatus {
   return 'insufficient'
 }
 
+function classifyHttpFailure(httpStatus: number): GlmReaderFailureCategory {
+  if (httpStatus >= 400 && httpStatus < 500) return 'HTTP_4XX'
+  if (httpStatus >= 500) return 'HTTP_5XX'
+  return 'UNKNOWN'
+}
+
+function classifyReaderException(error: unknown): GlmReaderFailureCategory {
+  if (!(error instanceof ResearchServiceError)) return 'UNKNOWN'
+  if (error.diagnosticCode === 'GLM_TIMEOUT') return 'TIMEOUT'
+  if (error.diagnosticCode === 'GLM_NETWORK_ERROR') return 'NETWORK'
+  if (error.diagnosticCode === 'GLM_RESPONSE_INVALID') return 'INVALID_RESPONSE'
+  return 'UNKNOWN'
+}
+
 export async function readResearchSourceWithGlm(url: string): Promise<GlmReaderResult> {
   try {
     const response = await requestGlmJson('/reader', {
@@ -311,12 +343,22 @@ export async function readResearchSourceWithGlm(url: string): Promise<GlmReaderR
       with_images_summary: false,
       with_links_summary: false,
     })
-    if (!response.ok || !isRecord(response.payload) || !isRecord(response.payload.reader_result)) {
+    if (!response.ok) {
       return {
         status: 'unavailable',
         content: '',
         contentLength: 0,
         httpStatus: response.httpStatus,
+        failureCategory: classifyHttpFailure(response.httpStatus),
+      }
+    }
+    if (!isRecord(response.payload) || !isRecord(response.payload.reader_result)) {
+      return {
+        status: 'unavailable',
+        content: '',
+        contentLength: 0,
+        httpStatus: response.httpStatus,
+        failureCategory: 'INVALID_RESPONSE',
       }
     }
     const content = asString(response.payload.reader_result.content)
@@ -325,13 +367,15 @@ export async function readResearchSourceWithGlm(url: string): Promise<GlmReaderR
       content,
       contentLength: content.length,
       httpStatus: response.httpStatus,
+      failureCategory: content.length === 0 ? 'EMPTY_CONTENT' : null,
     }
-  } catch {
+  } catch (error) {
     return {
       status: 'unavailable',
       content: '',
       contentLength: 0,
       httpStatus: null,
+      failureCategory: classifyReaderException(error),
     }
   }
 }
@@ -396,6 +440,28 @@ export async function enrichResearchSourcesWithGlm(
     }
   })
   const contentLengths = results.map((result) => result.contentLength)
+  const failureCategoryNames: GlmReaderFailureCategory[] = [
+    'HTTP_4XX',
+    'HTTP_5XX',
+    'TIMEOUT',
+    'NETWORK',
+    'INVALID_RESPONSE',
+    'EMPTY_CONTENT',
+    'UNKNOWN',
+  ]
+  const failureCategories = Object.fromEntries(
+    failureCategoryNames.map((category) => [
+      category,
+      results.filter((result) => result.failureCategory === category).length,
+    ]),
+  ) as Record<GlmReaderFailureCategory, number>
+  const httpStatusCounts = results.reduce<Record<string, number>>((counts, result) => {
+    if (result.failureCategory && result.httpStatus !== null) {
+      const key = String(result.httpStatus)
+      counts[key] = (counts[key] ?? 0) + 1
+    }
+    return counts
+  }, {})
   const readerStats: GlmReaderStats = {
     attemptedCount: results.length,
     fullTextCount: results.filter((result) => result.status === 'full_text').length,
@@ -408,6 +474,8 @@ export async function enrichResearchSourcesWithGlm(
     averageContentLength: contentLengths.length > 0
       ? Math.round(contentLengths.reduce((sum, length) => sum + length, 0) / contentLengths.length)
       : 0,
+    failureCategories,
+    httpStatusCounts,
   }
   const warnings: string[] = []
   if (readerStats.insufficientCount > 0) {
@@ -425,6 +493,8 @@ export async function enrichResearchSourcesWithGlm(
     failedCount: readerStats.failedCount,
     searchSummaryCount: readerStats.searchSummaryCount,
     averageContentLength: readerStats.averageContentLength,
+    failureCategories: readerStats.failureCategories,
+    httpStatusCounts: readerStats.httpStatusCounts,
     durationMs: Date.now() - startedAt,
   })
   return { evidenceSources, readerStats, warnings }

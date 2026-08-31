@@ -12,6 +12,7 @@ import {
 } from '../server/services/researchJobService'
 import type { ResearchRequest, ResearchResponse } from '../server/types/research'
 import { ResearchServiceError } from '../server/services/serviceError'
+import { StaleTaskWriteError } from '../server/db/errors'
 
 const request: ResearchRequest = {
   taskId: 'task-a',
@@ -133,6 +134,108 @@ test('Research Job 失败会持久化当前错误且不会自动切换 mock', as
     message: 'GLM 检索失败',
     status: 502,
   })
+})
+
+test('Stale Research Job 明确失败且不覆盖新 requestId', async () => {
+  let completed = false
+  let failure: { code: string; message: string; status: number | null } | null = null
+  const logs: Array<Record<string, unknown>> = []
+  const originalError = console.error
+  console.error = (_message, details) => {
+    if (details && typeof details === 'object') logs.push(details as Record<string, unknown>)
+  }
+  try {
+    await executeResearchJob(
+      { jobId: 'job-stale', ownerSessionId: 'owner-a', request },
+      {
+        markRunning: async () => job('running'),
+        research: async () => response,
+        complete: async () => {
+          completed = true
+          throw Object.assign(new StaleTaskWriteError(), {
+            researchJobFailurePoint: 'persist_task',
+          })
+        },
+        fail: async (_owner, _jobId, value) => {
+          failure = value
+          return job('failed')
+        },
+      },
+    )
+  } finally {
+    console.error = originalError
+  }
+  assert.equal(completed, true)
+  assert.deepEqual(failure, {
+    code: 'STALE_TASK_WRITE',
+    message: '该研究任务已被更新的请求替代，结果未写入当前任务。',
+    status: 409,
+  })
+  assert.ok(logs.some((entry) => (
+    entry.failurePoint === 'persist_task'
+    && entry.errorName === 'StaleTaskWriteError'
+    && entry.errorCode === 'STALE_TASK_WRITE'
+  )))
+})
+
+test('Research Job 持久化异常保留 INTERNAL_ERROR 和准确 failurePoint', async () => {
+  for (const failurePoint of ['persist_task', 'persist_job_complete'] as const) {
+    let failureCode = ''
+    const logs: Array<Record<string, unknown>> = []
+    const originalError = console.error
+    console.error = (_message, details) => {
+      if (details && typeof details === 'object') logs.push(details as Record<string, unknown>)
+    }
+    try {
+      await executeResearchJob(
+        { jobId: `job-${failurePoint}`, ownerSessionId: 'owner-a', request },
+        {
+          markRunning: async () => job('running'),
+          research: async () => response,
+          complete: async () => {
+            throw Object.assign(new Error('database failed'), {
+              code: '08006',
+              researchJobFailurePoint: failurePoint,
+            })
+          },
+          fail: async (_owner, _jobId, value) => {
+            failureCode = value.code
+            return job('failed')
+          },
+        },
+      )
+    } finally {
+      console.error = originalError
+    }
+    assert.equal(failureCode, 'INTERNAL_ERROR')
+    assert.ok(logs.some((entry) => (
+      entry.failurePoint === failurePoint && entry.errorCode === 'INTERNAL_ERROR'
+    )))
+  }
+})
+
+test('失败状态持久化异常单独记录 persist_job_failed', async () => {
+  const logs: Array<Record<string, unknown>> = []
+  const originalError = console.error
+  console.error = (_message, details) => {
+    if (details && typeof details === 'object') logs.push(details as Record<string, unknown>)
+  }
+  try {
+    await executeResearchJob(
+      { jobId: 'job-fail-persistence', ownerSessionId: 'owner-a', request },
+      {
+        markRunning: async () => job('running'),
+        research: async () => { throw new Error('execution failed') },
+        fail: async () => { throw Object.assign(new Error('database failed'), { code: '08006' }) },
+      },
+    )
+  } finally {
+    console.error = originalError
+  }
+  assert.ok(logs.some((entry) => (
+    entry.failurePoint === 'persist_job_failed'
+    && entry.databaseErrorCode === '08006'
+  )))
 })
 
 test('Research Job scheduler 限制真正后台执行的生命周期并发', async () => {

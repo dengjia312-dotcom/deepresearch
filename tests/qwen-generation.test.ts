@@ -201,6 +201,50 @@ test('Synthesis 生成来源池外 URL 时不能建立来源或引用', async ()
   })
 })
 
+test('Qwen Synthesis 只记录安全的内容与 JSON 解析摘要', async () => {
+  const infoLogs: Array<[unknown, unknown]> = []
+  await withMockedQwen({
+    response: completion(JSON.stringify({
+      summary: '研究摘要',
+      insights: [{ title: '洞察', content: '洞察正文', sourceUrls: [] }],
+      warnings: ['证据有限'],
+    })),
+  }, async () => {
+    console.info = (message, details) => { infoLogs.push([message, details]) }
+    await synthesizeResearchResponse(
+      researchRequest,
+      [],
+      [],
+      { actualSourceCount: 0, deduplicatedSourceCount: 0 },
+    )
+  })
+  const contentLog = infoLogs.find(([message]) => message === '[research:synthesis] content')?.[1] as Record<string, unknown>
+  const validationLog = infoLogs.find(([message]) => message === '[research:synthesis] validation')?.[1] as Record<string, unknown>
+  assert.equal(contentLog.startsWithBrace, true)
+  assert.equal(contentLog.endsWithBrace, true)
+  assert.equal(contentLog.finishReason, 'stop')
+  assert.equal(validationLog.jsonParseSuccess, true)
+  assert.equal(validationLog.schemaValidationSuccess, true)
+  assert.equal(validationLog.summaryPresent, true)
+  assert.equal(validationLog.insightCount, 1)
+  assert.equal(validationLog.warningCount, 1)
+})
+
+test('Qwen Synthesis invalid JSON 保持 AI_GENERATION_RESPONSE_INVALID', async () => {
+  await withMockedQwen({ response: completion('not-json') }, async () => {
+    await assert.rejects(
+      synthesizeResearchResponse(
+        researchRequest,
+        [],
+        [],
+        { actualSourceCount: 0, deduplicatedSourceCount: 0 },
+      ),
+      (error: unknown) => error instanceof ResearchServiceError
+        && error.code === 'AI_GENERATION_RESPONSE_INVALID',
+    )
+  })
+})
+
 function reportRequest(): ReportRequest {
   const sources = [1, 2].map((index) => ({
     id: `source-${index}`,

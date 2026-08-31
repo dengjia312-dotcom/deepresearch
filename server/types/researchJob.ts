@@ -9,6 +9,15 @@ export type ResearchJobPhase =
   | 'completed'
   | 'failed'
 
+export type ResearchJobFailurePoint =
+  | 'job_start'
+  | 'research_execute'
+  | 'synthesis_parse'
+  | 'response_build'
+  | 'persist_task'
+  | 'persist_job_complete'
+  | 'persist_job_failed'
+
 export interface ResearchJobProgress {
   validSourceCount: number
   readerTargetCount: number

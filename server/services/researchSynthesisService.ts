@@ -24,6 +24,11 @@ interface ModelResearchPayload {
   warnings: string[]
 }
 
+export interface ResearchSynthesisHooks {
+  onSynthesisParsed?: () => Promise<void> | void
+  onResponseBuilt?: () => Promise<void> | void
+}
+
 function normalizeUrl(value: string) {
   try {
     const url = new URL(value)
@@ -36,7 +41,17 @@ function normalizeUrl(value: string) {
 }
 
 function parseModelResearchPayload(content: string): ModelResearchPayload {
-  const parsed = parseGeneratedJson(content)
+  let parsed: Record<string, unknown>
+  try {
+    parsed = parseGeneratedJson(content)
+  } catch (error) {
+    console.error('[research:synthesis] validation', {
+      jsonParseSuccess: false,
+      schemaValidationSuccess: false,
+      validationIssueNames: ['json_parse'],
+    })
+    throw error
+  }
   const summary = asString(parsed.summary)
   const rawInsights = Array.isArray(parsed.insights) ? parsed.insights : []
   const insights = rawInsights.flatMap<ModelInsight>((item) => {
@@ -52,7 +67,16 @@ function parseModelResearchPayload(content: string): ModelResearchPayload {
     ? parsed.warnings.map(asString).filter(Boolean)
     : []
 
-  if (!summary || insights.length === 0) {
+  const validationIssueNames = [
+    ...(!summary ? ['summary_missing'] : []),
+    ...(insights.length === 0 ? ['insights_missing'] : []),
+  ]
+  if (validationIssueNames.length > 0) {
+    console.error('[research:synthesis] validation', {
+      jsonParseSuccess: true,
+      schemaValidationSuccess: false,
+      validationIssueNames,
+    })
     throw new ResearchServiceError(
       'AI_GENERATION_RESPONSE_INVALID',
       502,
@@ -61,6 +85,13 @@ function parseModelResearchPayload(content: string): ModelResearchPayload {
       'QWEN_SYNTHESIS_INVALID',
     )
   }
+  console.info('[research:synthesis] validation', {
+    jsonParseSuccess: true,
+    schemaValidationSuccess: true,
+    summaryPresent: true,
+    insightCount: insights.length,
+    warningCount: warnings.length,
+  })
   return { summary, insights, warnings }
 }
 
@@ -158,6 +189,12 @@ export async function synthesizeResearch(
     maxCompletionTokens: 4096,
     temperature: 0.2,
   })
+  console.info('[research:synthesis] content', {
+    contentLength: result.content.length,
+    finishReason: result.finishReason,
+    startsWithBrace: result.content.startsWith('{'),
+    endsWithBrace: result.content.endsWith('}'),
+  })
   return parseModelResearchPayload(result.content)
 }
 
@@ -167,8 +204,10 @@ export async function synthesizeResearchResponse(
   evidenceSources: ResearchSynthesisEvidence[],
   counts: { actualSourceCount: number; deduplicatedSourceCount: number },
   retrievalWarnings: string[] = [],
+  hooks: ResearchSynthesisHooks = {},
 ): Promise<ResearchResponse> {
   const modelResult = await synthesizeResearch(request, evidenceSources)
+  await hooks.onSynthesisParsed?.()
   const sources = buildResearchSources(metadata)
   const { insights, hasUnlinkedInsight } = buildResearchInsights(modelResult.insights, sources)
   const warnings = [...retrievalWarnings, ...modelResult.warnings]
@@ -181,7 +220,7 @@ export async function synthesizeResearchResponse(
     )
   }
 
-  return {
+  const response: ResearchResponse = {
     taskId: request.taskId,
     requestId: request.requestId,
     mode: 'live',
@@ -197,4 +236,6 @@ export async function synthesizeResearchResponse(
     validSourceCount: sources.length,
     searchedAt: new Date().toISOString(),
   }
+  await hooks.onResponseBuilt?.()
+  return response
 }

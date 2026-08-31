@@ -29,6 +29,7 @@ export interface QwenGenerationRequest {
 
 export interface QwenGenerationResult {
   content: string
+  finishReason: string | null
   model: string
   durationMs: number
   inputTokens: number | null
@@ -188,6 +189,9 @@ export async function requestQwenGeneration(
       ? firstChoice.message
       : null
     const content = typeof message?.content === 'string' ? message.content.trim() : ''
+    const finishReason = isRecord(firstChoice) && typeof firstChoice.finish_reason === 'string'
+      ? firstChoice.finish_reason
+      : null
     if (!content) {
       throw new ResearchServiceError(
         'AI_GENERATION_RESPONSE_INVALID',
@@ -211,9 +215,11 @@ export async function requestQwenGeneration(
       upstreamHttpStatus,
       inputTokens,
       outputTokens,
+      finishReason,
     })
     return {
       content,
+      finishReason,
       model,
       durationMs,
       inputTokens,

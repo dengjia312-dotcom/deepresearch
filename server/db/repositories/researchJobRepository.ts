@@ -4,6 +4,7 @@ import type { ResearchRequest, ResearchResponse } from '../../types/research'
 import {
   emptyResearchJobProgress,
   type ResearchJobDto,
+  type ResearchJobFailurePoint,
   type ResearchJobPhase,
   type ResearchJobProgress,
   type ResearchJobStatus,
@@ -198,27 +199,65 @@ export async function completeResearchJob(
   pool: Pool = getDatabasePool(),
 ) {
   return withTransaction(async (client) => {
-    const row = await selectJobForUpdate(client, jobId)
-    if (row.owner_session_id !== ownerSessionId || row.status !== 'running') {
-      throw new StaleTaskWriteError()
+    console.info('[persistence] task-result started', { jobId })
+    let row: ResearchJobRow
+    try {
+      row = await selectJobForUpdate(client, jobId)
+      if (row.owner_session_id !== ownerSessionId || row.status !== 'running') {
+        throw new StaleTaskWriteError()
+      }
+      await completeOwnedResearchWithClient(
+        client,
+        ownerSessionId,
+        row.task_id,
+        row.request_id,
+        persistedResult,
+      )
+      console.info('[persistence] task-result completed', { jobId })
+    } catch (error) {
+      logPersistenceFailure('task-result', error)
+      throw attachFailurePoint(error, 'persist_task')
     }
-    await completeOwnedResearchWithClient(
-      client,
-      ownerSessionId,
-      row.task_id,
-      row.request_id,
-      persistedResult,
-    )
-    const result = await client.query<ResearchJobRow>(`
-      UPDATE research_jobs
-      SET status = 'completed', phase = 'completed', result = $2,
-          error_code = NULL, error_message = NULL, error_status = NULL,
-          completed_at = now(), updated_at = now()
-      WHERE id = $1 AND status = 'running'
-      RETURNING *
-    `, [jobId, response])
-    return toDto(result.rows[0]!)
+
+    console.info('[persistence] job-complete started', { jobId })
+    try {
+      const result = await client.query<ResearchJobRow>(`
+        UPDATE research_jobs
+        SET status = 'completed', phase = 'completed', result = $2,
+            error_code = NULL, error_message = NULL, error_status = NULL,
+            completed_at = now(), updated_at = now()
+        WHERE id = $1 AND status = 'running'
+        RETURNING *
+      `, [jobId, response])
+      if (!result.rows[0]) throw new StaleTaskWriteError()
+      console.info('[persistence] job-complete completed', { jobId })
+      return toDto(result.rows[0])
+    } catch (error) {
+      logPersistenceFailure('job-complete', error)
+      throw attachFailurePoint(error, 'persist_job_complete')
+    }
   }, pool)
+}
+
+function attachFailurePoint(error: unknown, failurePoint: ResearchJobFailurePoint) {
+  if (error && typeof error === 'object') {
+    Reflect.set(error, 'researchJobFailurePoint', failurePoint)
+  }
+  return error
+}
+
+function safeDatabaseErrorCode(error: unknown) {
+  if (!error || typeof error !== 'object') return null
+  const value = Reflect.get(error, 'code')
+  return typeof value === 'string' && /^[0-9A-Z]{5}$/.test(value) ? value : null
+}
+
+function logPersistenceFailure(operation: string, error: unknown) {
+  console.error('[persistence] failed', {
+    operation,
+    errorName: error instanceof Error ? error.name : 'UnknownError',
+    databaseErrorCode: safeDatabaseErrorCode(error),
+  })
 }
 
 export async function failResearchJob(

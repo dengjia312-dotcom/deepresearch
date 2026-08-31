@@ -11,6 +11,8 @@ export interface ResearchExecutionHooks {
   onReaderStarted?: (readerTargetCount: number) => Promise<void> | void
   onReaderCompleted?: (status: GlmReaderStatus) => Promise<void> | void
   onSynthesisStarted?: () => Promise<void> | void
+  onSynthesisParsed?: () => Promise<void> | void
+  onResponseBuilt?: () => Promise<void> | void
 }
 
 export async function researchWithProviders(
@@ -33,5 +35,9 @@ export async function researchWithProviders(
       deduplicatedSourceCount: retrieval.deduplicatedSourceCount,
     },
     retrieval.warnings,
+    {
+      onSynthesisParsed: hooks.onSynthesisParsed,
+      onResponseBuilt: hooks.onResponseBuilt,
+    },
   )
 }
