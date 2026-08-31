@@ -87,7 +87,7 @@ const researchRequest: ResearchRequest = {
   targetSourceCount: 8,
 }
 
-test('Plan/Outline 使用 FAST，Synthesis/Report 使用 STRONG 且关闭推理', async () => {
+test('统一任务策略保持模型选择并只为 Report 开启 medium reasoning', async () => {
   await withMockedQwen({}, async (bodies) => {
     for (const task of ['plan', 'outline', 'synthesis', 'report'] as const) {
       await generateContent(task, {
@@ -101,10 +101,43 @@ test('Plan/Outline 使用 FAST，Synthesis/Report 使用 STRONG 且关闭推理'
       'qwen-test-strong',
       'qwen-test-strong',
     ])
-    assert.ok(bodies.every((body) => body.reasoning_effort === 'none'))
+    assert.deepEqual(bodies.map((body) => body.reasoning_effort), [
+      'none',
+      'none',
+      'none',
+      'medium',
+    ])
     assert.ok(bodies.every((body) => body.tools === undefined))
     assert.ok(bodies.every((body) => body.tool_choice === undefined))
   })
+})
+
+test('Qwen started/completed 日志包含安全 reasoning policy 与 token 摘要', async () => {
+  const infoLogs: Array<[unknown, unknown]> = []
+  await withMockedQwen({
+    response: {
+      choices: [{ finish_reason: 'stop', message: { content: '{}' } }],
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 20,
+        completion_tokens_details: { reasoning_tokens: 7 },
+      },
+    },
+  }, async () => {
+    console.info = (message, details) => { infoLogs.push([message, details]) }
+    const result = await generateContent('report', {
+      messages: [{ role: 'user', content: 'test' }],
+      maxCompletionTokens: 100,
+    })
+    assert.equal(result.reasoningTokens, 7)
+  })
+  const started = infoLogs.find(([message]) => message === '[ai-generation] started')?.[1] as Record<string, unknown>
+  const completed = infoLogs.find(([message]) => message === '[ai-generation] completed')?.[1] as Record<string, unknown>
+  assert.equal(started.task, 'report')
+  assert.equal(started.modelClass, 'strong')
+  assert.equal(started.reasoningEffort, 'medium')
+  assert.equal(completed.reasoningTokens, 7)
+  assert.equal(completed.finishReason, 'stop')
 })
 
 test('Plan 严格 JSON 可以按原 schema 解析', async () => {

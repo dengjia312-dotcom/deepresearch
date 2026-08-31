@@ -12,6 +12,7 @@ const DEFAULT_FAST_TIMEOUT_MS = 60_000
 const DEFAULT_STRONG_TIMEOUT_MS = 120_000
 
 export type GenerationModelClass = 'fast' | 'strong'
+export type GenerationReasoningEffort = 'none' | 'medium' | 'high'
 export type GenerationTask = 'plan' | 'outline' | 'synthesis' | 'report'
 
 export interface GenerationMessage {
@@ -22,6 +23,7 @@ export interface GenerationMessage {
 export interface QwenGenerationRequest {
   task: GenerationTask
   modelClass: GenerationModelClass
+  reasoningEffort: GenerationReasoningEffort
   messages: GenerationMessage[]
   maxCompletionTokens: number
   temperature?: number
@@ -34,6 +36,7 @@ export interface QwenGenerationResult {
   durationMs: number
   inputTokens: number | null
   outputTokens: number | null
+  reasoningTokens: number | null
   upstreamHttpStatus: number
 }
 
@@ -141,6 +144,7 @@ export async function requestQwenGeneration(
     task: request.task,
     provider: 'qwen',
     modelClass: request.modelClass,
+    reasoningEffort: request.reasoningEffort,
   })
 
   try {
@@ -154,7 +158,7 @@ export async function requestQwenGeneration(
         model,
         messages: request.messages,
         stream: false,
-        reasoning_effort: 'none',
+        reasoning_effort: request.reasoningEffort,
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxCompletionTokens,
       }),
@@ -206,6 +210,13 @@ export async function requestQwenGeneration(
       ?? readTokenCount(usage, 'input_tokens')
     const outputTokens = readTokenCount(usage, 'completion_tokens')
       ?? readTokenCount(usage, 'output_tokens')
+    const completionTokenDetails = isRecord(usage?.completion_tokens_details)
+      ? usage.completion_tokens_details
+      : isRecord(usage?.output_tokens_details)
+        ? usage.output_tokens_details
+        : null
+    const reasoningTokens = readTokenCount(completionTokenDetails, 'reasoning_tokens')
+      ?? readTokenCount(usage, 'reasoning_tokens')
     const durationMs = Date.now() - startedAt
     console.info('[ai-generation] completed', {
       task: request.task,
@@ -215,6 +226,7 @@ export async function requestQwenGeneration(
       upstreamHttpStatus,
       inputTokens,
       outputTokens,
+      reasoningTokens,
       finishReason,
     })
     return {
@@ -224,6 +236,7 @@ export async function requestQwenGeneration(
       durationMs,
       inputTokens,
       outputTokens,
+      reasoningTokens,
       upstreamHttpStatus: response.status,
     }
   } catch (error) {

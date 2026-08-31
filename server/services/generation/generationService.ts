@@ -4,14 +4,20 @@ import {
   requestQwenGeneration,
   type GenerationMessage,
   type GenerationModelClass,
+  type GenerationReasoningEffort,
   type GenerationTask,
 } from './qwenGenerationProvider'
 
-const modelClassByTask: Record<GenerationTask, GenerationModelClass> = {
-  plan: 'fast',
-  outline: 'fast',
-  synthesis: 'strong',
-  report: 'strong',
+interface GenerationTaskPolicy {
+  modelClass: GenerationModelClass
+  reasoningEffort: GenerationReasoningEffort
+}
+
+const generationPolicyByTask: Record<GenerationTask, GenerationTaskPolicy> = {
+  plan: { modelClass: 'fast', reasoningEffort: 'none' },
+  outline: { modelClass: 'fast', reasoningEffort: 'none' },
+  synthesis: { modelClass: 'strong', reasoningEffort: 'none' },
+  report: { modelClass: 'strong', reasoningEffort: 'medium' },
 }
 
 interface GenerateContentOptions {
@@ -24,9 +30,10 @@ export async function generateContent(
   task: GenerationTask,
   options: GenerateContentOptions,
 ) {
+  const policy = generationPolicyByTask[task]
   return requestQwenGeneration({
     task,
-    modelClass: modelClassByTask[task],
+    ...policy,
     ...options,
   })
 }
@@ -63,4 +70,4 @@ export function parseGeneratedJson(content: string): Record<string, unknown> {
   )
 }
 
-export const generationServiceTestApi = { modelClassByTask }
+export const generationServiceTestApi = { generationPolicyByTask }
