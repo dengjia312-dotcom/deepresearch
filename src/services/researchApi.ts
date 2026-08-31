@@ -445,6 +445,38 @@ export async function requestTaskDetail(taskId: string, signal?: AbortSignal) {
   return response.json() as Promise<TaskDetailResponse>
 }
 
+export type ReportExportFormat = 'pdf' | 'docx'
+
+function reportExportFilename(response: Response, format: ReportExportFormat) {
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  if (encoded) {
+    try {
+      return decodeURIComponent(encoded)
+    } catch {
+      // Fall back to a safe local filename when the response header is malformed.
+    }
+  }
+  return `Deep_Research_Report.${format}`
+}
+
+export async function requestReportExport(
+  taskId: string,
+  format: ReportExportFormat,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(
+    `/api/tasks/${encodeURIComponent(taskId)}/report.${format}`,
+    { headers: createApiHeaders(), signal },
+  )
+  if (!response.ok) await parseError(response)
+  const blob = await response.blob()
+  if (blob.size === 0) {
+    throw new ResearchApiError('REPORT_EXPORT_FAILED', '导出的报告文件为空。', 500)
+  }
+  return { blob, filename: reportExportFilename(response, format) }
+}
+
 export async function requestCreateTask(task: ResearchTask, signal?: AbortSignal) {
   const response = await fetch('/api/tasks', {
     method: 'POST',

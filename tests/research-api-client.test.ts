@@ -7,6 +7,7 @@ import {
   requestLivePlan,
   requestLiveReport,
   requestLiveResearch,
+  requestReportExport,
   ResearchApiError,
 } from '../src/services/researchApi'
 
@@ -110,4 +111,32 @@ test('前端收到 429 后只抛出错误且不会自动重试', async () => {
   }
 
   assert.equal(requestCount, 1)
+})
+
+test('报告导出携带 sessionId 并使用服务端 UTF-8 文件名', async () => {
+  const originalFetch = globalThis.fetch
+  let requestedUrl = ''
+  let sessionId = ''
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input)
+    sessionId = new Headers(init?.headers).get(clientSessionTestApi.headerName) ?? ''
+    return new Response(new Uint8Array([0x25, 0x50, 0x44, 0x46]), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': "attachment; filename=report.pdf; filename*=UTF-8''C%E7%AB%AF%E6%8A%A5%E5%91%8A_2026-08-30.pdf",
+      },
+    })
+  }
+
+  try {
+    const result = await requestReportExport('task-export-12345678', 'pdf')
+    assert.equal(result.filename, 'C端报告_2026-08-30.pdf')
+    assert.equal(result.blob.size, 4)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  assert.equal(requestedUrl, '/api/tasks/task-export-12345678/report.pdf')
+  assert.equal(clientSessionTestApi.isValidClientSessionId(sessionId), true)
 })

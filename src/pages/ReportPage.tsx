@@ -16,6 +16,10 @@ import {
   getTaskSourceRoute,
   useResearch,
 } from '../context/ResearchContext'
+import {
+  requestReportExport,
+  type ReportExportFormat,
+} from '../services/researchApi'
 
 const reportDepthLabels = {
   brief: '简要报告',
@@ -60,6 +64,8 @@ export function ReportPage() {
   const [activeSourceId, setActiveSourceId] = useState<string | null>(
     citedSources[0]?.id ?? null,
   )
+  const [exportingFormat, setExportingFormat] = useState<ReportExportFormat | null>(null)
+  const [exportError, setExportError] = useState<string | null>(null)
 
   useEffect(() => {
     if (citedSources.length === 0) {
@@ -83,6 +89,28 @@ export function ReportPage() {
         .querySelector<HTMLElement>(`[data-citation-source="${sourceId}"]`)
         ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     })
+  }
+
+  const exportReport = async (format: ReportExportFormat) => {
+    setExportingFormat(format)
+    setExportError(null)
+    try {
+      const { blob, filename } = await requestReportExport(state.task.id, format)
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+    } catch (error) {
+      const label = format === 'pdf' ? 'PDF' : 'Word'
+      const detail = error instanceof Error ? error.message : '请稍后重试。'
+      setExportError(`${label} 导出失败：${detail}`)
+    } finally {
+      setExportingFormat(null)
+    }
   }
 
   if (!state.reportGenerated) {
@@ -154,12 +182,32 @@ export function ReportPage() {
             <Share2 size={15} />
             分享
           </button>
-          <button type="button" onClick={() => window.print()} className="btn-primary">
+          <button
+            type="button"
+            onClick={() => void exportReport('pdf')}
+            disabled={!state.liveReport || exportingFormat !== null}
+            className="btn-primary"
+          >
             <Download size={16} />
-            导出 PDF
+            {exportingFormat === 'pdf' ? '正在导出 PDF' : '导出 PDF'}
+          </button>
+          <button
+            type="button"
+            onClick={() => void exportReport('docx')}
+            disabled={!state.liveReport || exportingFormat !== null}
+            className="btn-secondary h-10 px-4"
+          >
+            <FileText size={16} />
+            {exportingFormat === 'docx' ? '正在导出 Word' : '导出 Word'}
           </button>
         </div>
       </section>
+
+      {exportError && (
+        <section className="mb-5 rounded-lg border border-rose-200 bg-rose-50 p-4" role="alert">
+          <p className="text-sm text-rose-700">{exportError}</p>
+        </section>
+      )}
 
       {state.reportStatus === 'loading' && (
         <section className="ai-response-block mb-5 p-4" aria-live="polite">
@@ -276,6 +324,31 @@ export function ReportPage() {
                     ))}
                   </section>
                 )}
+                <section>
+                  <h2 className="mb-4 text-xl font-semibold text-ink">References / 参考来源</h2>
+                  {citedSources.length === 0 ? (
+                    <p className="text-sm leading-6 text-ink-muted">本报告暂无可追溯引用来源。</p>
+                  ) : (
+                    <ol className="space-y-4">
+                      {citedSources.map((source, index) => (
+                        <li key={source.id} className="text-sm leading-6 text-ink-muted">
+                          <p className="font-semibold text-ink">[{index + 1}] {source.title}</p>
+                          <p className="text-xs text-ink-subtle">
+                            {[source.publisher, source.publishDate].filter(Boolean).join(' · ')}
+                          </p>
+                          <a
+                            href={source.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="break-all text-xs text-primary-deep hover:underline"
+                          >
+                            {source.url}
+                          </a>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
               </>
             ) : reportSections.map((section) => (
               <section key={section.id}>

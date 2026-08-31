@@ -38,6 +38,8 @@ import type {
   ResearchTask,
   Source,
 } from '../src/types'
+import { exportOwnedReport } from '../server/reporting/reportExportService'
+import { ReportNotReadyError } from '../server/reporting/reportDocument'
 
 const connectionString = process.env.TEST_DATABASE_URL?.trim()
 const skipReason = connectionString ? false : '需要真实 TEST_DATABASE_URL；不使用 mock 或内存数据库替代。'
@@ -586,4 +588,23 @@ pgTest('27. 数据库约束失败时不会产生假成功任务', async () => {
   invalid.reportTargetMinWords = -1
   await assert.rejects(() => createOwnedTask(ownerId, { task: invalid }, pool))
   assert.equal((await listOwnedTasks(ownerId, pool)).length, 0)
+})
+
+pgTest('28. 非所属 session 不能导出报告', async () => {
+  const ownerId = await owner()
+  const otherOwnerId = await owner()
+  const detail = await completedChain(ownerId)
+  await assert.rejects(
+    () => exportOwnedReport(otherOwnerId, detail.state.task.id, 'pdf', pool),
+    TaskNotFoundError,
+  )
+})
+
+pgTest('29. 报告未生成不能导出', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  await assert.rejects(
+    () => exportOwnedReport(ownerId, detail.state.task.id, 'docx', pool),
+    ReportNotReadyError,
+  )
 })

@@ -16,6 +16,15 @@ import { getOwnerSessionId } from '../middleware/sessionOwner'
 import type { ResearchPlan, ResearchTask, Source } from '../../src/types'
 import type { ResearchErrorResponse } from '../types/research'
 import { isLikelyDatabaseError, sendPersistenceError } from './persistenceErrors'
+import {
+  exportOwnedReport,
+  reportContentDisposition,
+  type ReportExportFormat,
+} from '../reporting/reportExportService'
+import {
+  ReportDocumentInvalidError,
+  ReportNotReadyError,
+} from '../reporting/reportDocument'
 
 export const tasksRouter = Router()
 
@@ -82,6 +91,53 @@ function isSource(value: unknown): value is Source {
     && ['high', 'medium', 'low', 'unverified'].includes(source.credibility ?? '')
 }
 
+async function sendReportExport(
+  format: ReportExportFormat,
+  request: Request,
+  response: Response,
+) {
+  if (!isTaskId(request.params.taskId)) {
+    response.status(404).json({ error: { code: 'TASK_NOT_FOUND', message: '研究任务不存在。' } })
+    return
+  }
+  try {
+    const result = await exportOwnedReport(
+      getOwnerSessionId(response),
+      request.params.taskId,
+      format,
+    )
+    response.setHeader('Content-Type', result.contentType)
+    response.setHeader('Content-Disposition', reportContentDisposition(result.filename))
+    response.setHeader('Content-Length', String(result.buffer.length))
+    response.send(result.buffer)
+  } catch (error) {
+    if (error instanceof ReportNotReadyError) {
+      response.status(409).json({
+        error: { code: 'REPORT_NOT_READY', message: '研究报告尚未生成，暂时无法导出。' },
+      })
+      return
+    }
+    if (error instanceof ReportDocumentInvalidError) {
+      response.status(422).json({
+        error: { code: 'REPORT_DATA_INVALID', message: error.message },
+      })
+      return
+    }
+    if (sendPersistenceError(error, response as Response<ResearchErrorResponse>)) return
+    if (isLikelyDatabaseError(error)) {
+      sendTaskError(error, response)
+      return
+    }
+    console.error('[report-export] Generation failed', {
+      format,
+      name: error instanceof Error ? error.name : 'UnknownError',
+    })
+    response.status(500).json({
+      error: { code: 'REPORT_EXPORT_FAILED', message: '报告导出失败，请稍后重试。' },
+    })
+  }
+}
+
 tasksRouter.get('/', async (_request, response) => {
   try {
     response.json({ tasks: await listOwnedTasks(getOwnerSessionId(response)) })
@@ -132,6 +188,14 @@ tasksRouter.post('/import-v4', async (request, response) => {
   } catch (error) {
     sendTaskError(error, response)
   }
+})
+
+tasksRouter.get('/:taskId/report.pdf', async (request, response) => {
+  await sendReportExport('pdf', request, response)
+})
+
+tasksRouter.get('/:taskId/report.docx', async (request, response) => {
+  await sendReportExport('docx', request, response)
 })
 
 tasksRouter.get('/:taskId', async (request, response) => {
