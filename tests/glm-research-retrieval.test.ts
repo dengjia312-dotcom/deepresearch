@@ -8,10 +8,10 @@ import {
   type GlmReaderResult,
 } from '../server/services/glmResearchRetrievalService'
 import {
-  buildMimoResearchSynthesisRequestBody,
-  MimoServiceError,
-  synthesizeResearchResponseWithMimo,
-} from '../server/services/mimoResearchService'
+  buildResearchSynthesisPrompt,
+  synthesizeResearchResponse,
+} from '../server/services/researchSynthesisService'
+import { ResearchServiceError } from '../server/services/serviceError'
 import { researchWithProviders } from '../server/services/researchService'
 import type {
   ResearchRequest,
@@ -72,8 +72,9 @@ async function withMockedProviders<T>(
   const environment = {
     GLM_API_KEY: process.env.GLM_API_KEY,
     GLM_BASE_URL: process.env.GLM_BASE_URL,
-    AI_API_KEY: process.env.AI_API_KEY,
-    AI_BASE_URL: process.env.AI_BASE_URL,
+    QWEN_API_KEY: process.env.QWEN_API_KEY,
+    QWEN_BASE_URL: process.env.QWEN_BASE_URL,
+    QWEN_STRONG_MODEL: process.env.QWEN_STRONG_MODEL,
   }
   const originalInfo = console.info
   const originalWarn = console.warn
@@ -81,8 +82,9 @@ async function withMockedProviders<T>(
   globalThis.fetch = fetchImpl
   process.env.GLM_API_KEY = 'test-glm-key'
   process.env.GLM_BASE_URL = 'https://glm.test/api/paas/v4'
-  process.env.AI_API_KEY = 'test-mimo-key'
-  process.env.AI_BASE_URL = 'https://mimo.test/v1'
+  process.env.QWEN_API_KEY = 'test-qwen-key'
+  process.env.QWEN_BASE_URL = 'https://qwen.test/v1'
+  process.env.QWEN_STRONG_MODEL = 'qwen-test-strong'
   console.info = () => undefined
   console.warn = () => undefined
   console.error = () => undefined
@@ -258,17 +260,16 @@ test('每条 Reader 正文送入 Synthesis 前最多保留 6000 字符', async (
   )
 })
 
-test('MiMo Synthesis 请求完全不携带 web_search 或 tools', () => {
+test('Qwen Synthesis prompt 只包含给定证据且生成请求不使用搜索工具', () => {
   const evidence: ResearchSynthesisEvidence = {
     ...metadata(1),
     sourceId: 'source-1',
     evidenceType: 'full_text',
     content: '正文证据',
   }
-  const body = buildMimoResearchSynthesisRequestBody(request, [evidence])
-  assert.equal(body.tools, undefined)
-  assert.equal(body.tool_choice, undefined)
-  assert.doesNotMatch(JSON.stringify(body), /web_search|force_search/)
+  const prompt = buildResearchSynthesisPrompt(request, [evidence])
+  assert.match(prompt, /正文证据/)
+  assert.doesNotMatch(prompt, /web_search|force_search/)
 })
 
 test('Synthesis 返回来源池外 URL 时不会建立真实引用', async () => {
@@ -290,7 +291,7 @@ test('Synthesis 返回来源池外 URL 时不会建立真实引用', async () =>
       warnings: [],
     }) } }],
   }), { status: 200, headers: { 'Content-Type': 'application/json' } }), async () => {
-    const result = await synthesizeResearchResponseWithMimo(
+    const result = await synthesizeResearchResponse(
       request,
       [source],
       [evidence],
@@ -303,7 +304,7 @@ test('Synthesis 返回来源池外 URL 时不会建立真实引用', async () =>
 })
 
 test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 sources', async () => {
-  const mimoBodies: Record<string, unknown>[] = []
+  const generationBodies: Record<string, unknown>[] = []
   let readerCount = 0
   await withMockedProviders(async (input, init) => {
     const url = String(input)
@@ -320,7 +321,7 @@ test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 so
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>
-    mimoBodies.push(body)
+    generationBodies.push(body)
     return new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify({
         summary: '研究摘要',
@@ -335,8 +336,9 @@ test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 so
   }, async () => {
     const result = await researchWithProviders(request)
     assert.equal(readerCount, 8)
-    assert.equal(mimoBodies.length, 1)
-    assert.equal(mimoBodies[0]?.tools, undefined)
+    assert.equal(generationBodies.length, 1)
+    assert.equal(generationBodies[0]?.tools, undefined)
+    assert.equal(generationBodies[0]?.reasoning_effort, 'none')
     assert.deepEqual(Object.keys(result).sort(), [
       'actualSourceCount',
       'dataSource',
@@ -370,7 +372,7 @@ test('GLM Search HTTP 失败不重试且不会自动切换 mock', async () => {
   }, async () => {
     await assert.rejects(
       searchResearchSourcesWithGlm(request),
-      (error: unknown) => error instanceof MimoServiceError
+      (error: unknown) => error instanceof ResearchServiceError
         && error.code === 'RESEARCH_SEARCH_FAILED',
     )
     assert.equal(fetchCount, 1)
@@ -394,7 +396,7 @@ test('GLM Search HTTP 200 但零有效来源时只重试一次', async () => {
   }, async () => {
     await assert.rejects(
       searchResearchSourcesWithGlm(request),
-      (error: unknown) => error instanceof MimoServiceError
+      (error: unknown) => error instanceof ResearchServiceError
         && error.code === 'NO_REAL_SOURCES',
     )
     assert.equal(fetchCount, 2)

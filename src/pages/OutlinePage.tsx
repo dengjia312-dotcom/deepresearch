@@ -230,7 +230,7 @@ export function OutlinePage() {
 
       {state.reportStatus === 'loading' && (
         <section className="ai-response-block mb-5 p-4" aria-live="polite">
-          <p className="text-sm font-semibold text-ink">MiMo 正在基于当前大纲撰写真实报告</p>
+          <p className="text-sm font-semibold text-ink">AI 正在基于当前大纲撰写真实报告</p>
           <p className="mt-2 text-xs text-ink-muted">{reportProgressMessages[reportProgressIndex]}</p>
         </section>
       )}

@@ -14,14 +14,13 @@ import { researchJobsRouter } from './routes/researchJobs'
 import { outlineRouter } from './routes/outline'
 import { reportRouter } from './routes/report'
 import { tasksRouter } from './routes/tasks'
-import { getMimoConfiguration } from './services/mimoResearchService'
+import { getQwenConfiguration } from './services/generation/qwenGenerationProvider'
 import type { ResearchErrorResponse } from './types/research'
 import { sessionOwnerMiddleware } from './middleware/sessionOwner'
 import { runDatabaseMigrations } from './db/migrate'
 import { recoverInterruptedStages } from './db/repositories/taskRepository'
 import { recoverInterruptedResearchJobs } from './db/repositories/researchJobRepository'
 import { closeDatabasePool } from './db/pool'
-import { startMimoWebSearchStartupDiagnostic } from './services/mimoWebSearchStartupDiagnostic'
 
 const app = express()
 const port = Number.parseInt(process.env.PORT ?? '3001', 10) || 3001
@@ -42,11 +41,12 @@ app.use('/api/tasks/import-v4', express.json({ limit: '5mb' }))
 app.use(express.json({ limit: '128kb' }))
 
 app.get('/api/health', (_request, response) => {
-  const config = getMimoConfiguration()
+  const config = getQwenConfiguration()
   response.json({
     status: 'ok',
+    // Retained for compatibility with existing clients; it now reflects generation readiness.
     mimoConfigured: config.configured,
-    model: config.model,
+    model: config.fastModel,
   })
 })
 
@@ -110,17 +110,17 @@ async function startServer() {
   await recoverInterruptedResearchJobs()
   await recoverInterruptedStages()
   app.listen(port, '0.0.0.0', () => {
-    const { apiKey, baseUrl, configured, model } = getMimoConfiguration()
+    const { apiKey, configured, fastModel, strongModel } = getQwenConfiguration()
     console.log(`[server] listening on 0.0.0.0:${port}`)
     console.log('[server] AI config fingerprint', {
-      baseUrl,
-      model,
+      provider: 'qwen',
+      fastModel,
+      strongModel,
       apiKeyConfigured: configured,
       apiKeyFingerprint: apiKey
         ? createHash('sha256').update(apiKey).digest('hex').slice(0, 8)
         : null,
     })
-    void startMimoWebSearchStartupDiagnostic()
   })
 }
 

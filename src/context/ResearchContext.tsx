@@ -835,17 +835,22 @@ function getResearchRequestFailure(error: unknown): ResearchRequestFailure {
   const messages: Record<string, string> = {
     API_RATE_LIMITED: '请求过于频繁，请等待提示时间后手动重试。',
     API_CONCURRENCY_LIMITED: '当前服务请求较多，请稍后手动重试。',
-    MIMO_NOT_CONFIGURED: 'MiMo API 尚未配置，请联系管理员检查后端环境变量。',
-    MIMO_AUTH_FAILED: 'MiMo API 鉴权失败，请联系管理员检查后端配置。',
-    MIMO_ACCESS_DENIED: 'MiMo API 拒绝访问，请检查服务开通状态。',
-    MIMO_QUOTA_EXCEEDED: 'MiMo API 余额不足，请充值后重试。',
-    MIMO_TIMEOUT: 'MiMo 请求超时，请稍后重试。',
-    MIMO_RATE_LIMITED: '请求过于频繁或套餐额度已耗尽，请稍后重试。',
-    MIMO_NETWORK_ERROR: '后端暂时无法连接 MiMo API，请稍后重试。',
+    AI_GENERATION_NOT_CONFIGURED: 'AI 生成服务尚未配置，请联系管理员检查后端环境变量。',
+    AI_GENERATION_TIMEOUT: 'AI 生成超时，请稍后重试。',
+    AI_GENERATION_RATE_LIMITED: '当前生成请求较多，请稍后重试。',
+    AI_GENERATION_RESPONSE_INVALID: 'AI 返回的数据结构异常，请重新生成。',
+    AI_GENERATION_FAILED: 'AI 生成失败，请稍后重试。',
+    MIMO_NOT_CONFIGURED: 'AI 生成服务尚未配置，请联系管理员检查后端环境变量。',
+    MIMO_AUTH_FAILED: 'AI 生成服务鉴权失败，请联系管理员检查后端配置。',
+    MIMO_ACCESS_DENIED: 'AI 生成服务拒绝访问，请联系管理员检查后端配置。',
+    MIMO_QUOTA_EXCEEDED: 'AI 生成服务额度不足，请联系管理员检查配置。',
+    MIMO_TIMEOUT: 'AI 生成超时，请稍后重试。',
+    MIMO_RATE_LIMITED: '当前生成请求较多，请稍后重试。',
+    MIMO_NETWORK_ERROR: '后端暂时无法连接 AI 生成服务，请稍后重试。',
     RESEARCH_SEARCH_FAILED: 'GLM 联网检索暂时失败，请稍后手动重试。',
     RESEARCH_JOB_INTERRUPTED: '研究任务因服务中断未完成，请重新发起研究。',
     NO_REAL_SOURCES: '本次研究没有返回可验证的真实来源，请调整主题后重试。',
-    MIMO_RESPONSE_INVALID: 'MiMo 返回的数据结构异常，请重新生成。',
+    MIMO_RESPONSE_INVALID: 'AI 返回的数据结构异常，请重新生成。',
   }
   return createResearchRequestFailure(
     messages[error.code] ?? error.message ?? '联网研究失败，请稍后重试。',
@@ -2434,7 +2439,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
             targetSourceCount,
             ...createResearchRequestFailure(
               'Research Job 已完成，但没有返回有效研究结果。',
-              'MIMO_RESPONSE_INVALID',
+              'AI_GENERATION_RESPONSE_INVALID',
             ),
           })
           return false
@@ -2448,7 +2453,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
             targetSourceCount,
             ...createResearchRequestFailure(
               '联网研究没有返回可展示的有效来源或结构化结果。',
-              'MIMO_RESPONSE_INVALID',
+              'AI_GENERATION_RESPONSE_INVALID',
             ),
           })
           return false
@@ -2702,7 +2707,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
           requestId,
           ...createResearchRequestFailure(
             '研究计划返回结构异常，请重新生成。',
-            'MIMO_RESPONSE_INVALID',
+            'AI_GENERATION_RESPONSE_INVALID',
           ),
         })
         return false
@@ -3124,7 +3129,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
           poolVersion,
           ...createResearchRequestFailure(
             '大纲返回结构异常或包含未知来源，请重新生成。',
-            'MIMO_RESPONSE_INVALID',
+            'AI_GENERATION_RESPONSE_INVALID',
           ),
         })
         return false
@@ -3314,7 +3319,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
           reportDepth: state.task.reportDepth,
           ...createResearchRequestFailure(
             '报告返回结构异常或包含未知来源，请重新生成。',
-            'MIMO_RESPONSE_INVALID',
+            'AI_GENERATION_RESPONSE_INVALID',
           ),
         })
         return false

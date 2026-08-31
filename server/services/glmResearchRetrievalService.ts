@@ -4,7 +4,8 @@ import type {
   ResearchSynthesisEvidence,
   VerifiedSearchMetadata,
 } from '../types/research'
-import { asString, isRecord, MimoServiceError } from './mimoResearchService'
+import { ResearchServiceError } from './serviceError'
+import { asString, isRecord } from './serviceUtils'
 import {
   getAiConcurrencyRetryAfterSeconds,
   tryAcquireGlobalAiSlot,
@@ -116,7 +117,7 @@ async function requestGlmJson(
 ): Promise<GlmJsonResponse> {
   const config = getGlmConfiguration()
   if (!config.configured) {
-    throw new MimoServiceError(
+    throw new ResearchServiceError(
       'RESEARCH_SEARCH_FAILED',
       503,
       'GLM API 尚未配置。',
@@ -125,7 +126,7 @@ async function requestGlmJson(
 
   const releaseAiSlot = tryAcquireGlobalAiSlot()
   if (!releaseAiSlot) {
-    throw new MimoServiceError(
+    throw new ResearchServiceError(
       'API_CONCURRENCY_LIMITED',
       503,
       '当前 AI 服务请求较多，请稍后手动重试。',
@@ -150,7 +151,7 @@ async function requestGlmJson(
       payload = await response.json()
     } catch {
       if (response.ok) {
-        throw new MimoServiceError(
+        throw new ResearchServiceError(
           'RESEARCH_SEARCH_FAILED',
           502,
           'GLM API 返回格式异常。',
@@ -159,10 +160,10 @@ async function requestGlmJson(
     }
     return { httpStatus: response.status, ok: response.ok, payload }
   } catch (error) {
-    if (error instanceof MimoServiceError) throw error
+    if (error instanceof ResearchServiceError) throw error
     const timedOut = error instanceof Error
       && (error.name === 'AbortError' || error.name === 'TimeoutError')
-    throw new MimoServiceError(
+    throw new ResearchServiceError(
       'RESEARCH_SEARCH_FAILED',
       timedOut ? 504 : 502,
       timedOut ? 'GLM API 请求超时。' : '无法连接 GLM API。',
@@ -182,7 +183,7 @@ function createGlmSearchHttpError(httpStatus: number) {
       : httpStatus === 429
         ? 'GLM Web Search 请求过于频繁，请稍后手动重试。'
         : `GLM Web Search 请求失败（${httpStatus}）。`
-  return new MimoServiceError('RESEARCH_SEARCH_FAILED', statusCode, message)
+  return new ResearchServiceError('RESEARCH_SEARCH_FAILED', statusCode, message)
 }
 
 function mapGlmSearchResults(payload: unknown): SearchMappingResult | null {
@@ -252,7 +253,7 @@ export async function searchResearchSourcesWithGlm(request: ResearchRequest) {
 
     const mapped = mapGlmSearchResults(response.payload)
     if (!mapped) {
-      throw new MimoServiceError(
+      throw new ResearchServiceError(
         'RESEARCH_SEARCH_FAILED',
         502,
         'GLM Web Search 返回格式异常。',
@@ -287,7 +288,7 @@ export async function searchResearchSourcesWithGlm(request: ResearchRequest) {
     errorCode: 'NO_REAL_SOURCES',
     durationMs: Date.now() - searchStartedAt,
   })
-  throw new MimoServiceError(
+  throw new ResearchServiceError(
     'NO_REAL_SOURCES',
     502,
     'GLM Web Search 未返回可验证的真实来源。',

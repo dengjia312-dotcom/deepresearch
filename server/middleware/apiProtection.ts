@@ -252,6 +252,10 @@ export function createApiProtectionMiddleware(
       },
     ], now())
     if (!rateResult.allowed) {
+      console.warn('[api-protection] request rejected', {
+        operation,
+        errorCode: 'LOCAL_RATE_LIMITED',
+      })
       sendProtectionError(
         response,
         429,

@@ -3,7 +3,7 @@ import {
   retrieveResearchSourcesWithGlm,
   type GlmReaderStatus,
 } from './glmResearchRetrievalService'
-import { synthesizeResearchResponseWithMimo } from './mimoResearchService'
+import { synthesizeResearchResponse } from './researchSynthesisService'
 
 export interface ResearchExecutionHooks {
   onSearchStarted?: () => Promise<void> | void
@@ -24,7 +24,7 @@ export async function researchWithProviders(
     onReaderCompleted: hooks.onReaderCompleted,
   })
   await hooks.onSynthesisStarted?.()
-  return synthesizeResearchResponseWithMimo(
+  return synthesizeResearchResponse(
     request,
     retrieval.metadata,
     retrieval.evidenceSources,

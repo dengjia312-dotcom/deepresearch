@@ -300,6 +300,11 @@ test('过期 rate-limit entry 可以被清理', () => {
 })
 
 test('AI 上游槽位的调用点在 finally 中释放', () => {
-  const source = readFileSync('server/services/mimoResearchService.ts', 'utf8')
-  assert.match(source, /finally\s*{[\s\S]*clearTimeout\(timeout\)[\s\S]*releaseAiSlot\(\)/)
+  const generationSource = readFileSync(
+    'server/services/generation/qwenGenerationProvider.ts',
+    'utf8',
+  )
+  const retrievalSource = readFileSync('server/services/glmResearchRetrievalService.ts', 'utf8')
+  assert.match(generationSource, /finally\s*{[\s\S]*clearTimeout\(timeout\)[\s\S]*releaseAiSlot\(\)/)
+  assert.match(retrievalSource, /finally\s*{[\s\S]*clearTimeout\(timeout\)[\s\S]*releaseAiSlot\(\)/)
 })

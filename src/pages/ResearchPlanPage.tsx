@@ -60,7 +60,7 @@ export function ResearchPlanPage() {
               <span className="section-label mt-5 inline-block">Research Planning</span>
               <h1 className="mt-2 text-2xl font-semibold text-ink">正在生成真实研究计划</h1>
               <p className="mt-3 text-sm text-ink-muted">
-                MiMo 正在根据“{state.task.title}”生成研究目标、研究范围与核心问题。
+                AI 正在根据“{state.task.title}”生成研究目标、研究范围与核心问题。
               </p>
             </>
           ) : (
@@ -236,7 +236,7 @@ export function ResearchPlanPage() {
                   <div className="mb-2 flex items-center gap-2 text-primary-deep">
                   <Sparkles size={15} />
                     <span className="text-xs font-semibold">
-                      {state.planMode === 'real' ? 'MiMo 真实生成目标' : '演示计划目标'}
+                      {state.planMode === 'real' ? 'AI 真实生成目标' : '演示计划目标'}
                     </span>
                   </div>
                   <p className="text-sm leading-6 text-ink-muted">{plan.objective}</p>

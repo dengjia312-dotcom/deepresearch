@@ -1,5 +1,5 @@
 import type { ResearchRequest, ResearchResponse } from '../types/research'
-import { MimoServiceError } from './mimoResearchService'
+import { ResearchServiceError } from './serviceError'
 import { toPersistedResearchResult } from './persistenceTransform'
 import { researchWithProviders, type ResearchExecutionHooks } from './researchService'
 import {
@@ -75,7 +75,7 @@ export async function executeResearchJob(
       sourceCount: response.sources.length,
     })
   } catch (error) {
-    const failure = error instanceof MimoServiceError
+    const failure = error instanceof ResearchServiceError
       ? { code: error.code, message: error.publicMessage, status: error.statusCode }
       : {
           code: 'INTERNAL_ERROR',

@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express'
-import { generatePlanWithMimo } from '../services/mimoPlanService'
-import { MimoServiceError } from '../services/mimoResearchService'
+import { generatePlan } from '../services/planGenerationService'
+import { ResearchServiceError } from '../services/serviceError'
 import {
   completeOwnedPlan,
   failOwnedStage,
@@ -67,7 +67,7 @@ planRouter.post(
         new Date().toISOString(),
       )
       stageStarted = true
-      const generated = await generatePlanWithMimo(input)
+      const generated = await generatePlan(input)
       const plan = toPersistedPlan(
         generated,
         currentTask.state.task.usesPrototypeData,
@@ -78,9 +78,9 @@ planRouter.post(
       if (stageStarted) {
         try {
           await failOwnedStage(ownerSessionId, input.taskId, 'plan', input.requestId, {
-            errorCode: error instanceof MimoServiceError ? error.code : 'INTERNAL_ERROR',
-            errorStatus: error instanceof MimoServiceError ? error.statusCode : 500,
-            errorMessage: error instanceof MimoServiceError
+            errorCode: error instanceof ResearchServiceError ? error.code : 'INTERNAL_ERROR',
+            errorStatus: error instanceof ResearchServiceError ? error.statusCode : 500,
+            errorMessage: error instanceof ResearchServiceError
               ? error.publicMessage
               : '研究计划生成或保存失败。',
             failedAt: new Date().toISOString(),
@@ -89,9 +89,11 @@ planRouter.post(
           // A newer request or a database outage must not be hidden by this cleanup attempt.
         }
       }
-      if (error instanceof MimoServiceError) {
-        console.error('[plan] MiMo request failed', {
+      if (error instanceof ResearchServiceError) {
+        console.error('[plan] generation request failed', {
+          provider: 'qwen',
           code: error.code,
+          diagnosticCode: error.diagnosticCode,
           statusCode: error.statusCode,
         })
         if (error.retryAfterSeconds) {

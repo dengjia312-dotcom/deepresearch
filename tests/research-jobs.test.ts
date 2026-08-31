@@ -11,7 +11,7 @@ import {
   ResearchJobScheduler,
 } from '../server/services/researchJobService'
 import type { ResearchRequest, ResearchResponse } from '../server/types/research'
-import { MimoServiceError } from '../server/services/mimoResearchService'
+import { ResearchServiceError } from '../server/services/serviceError'
 
 const request: ResearchRequest = {
   taskId: 'task-a',
@@ -120,7 +120,7 @@ test('Research Job 失败会持久化当前错误且不会自动切换 mock', as
     {
       markRunning: async () => job('running'),
       research: async () => {
-        throw new MimoServiceError('RESEARCH_SEARCH_FAILED', 502, 'GLM 检索失败')
+        throw new ResearchServiceError('RESEARCH_SEARCH_FAILED', 502, 'GLM 检索失败')
       },
       fail: async (_owner, _jobId, value) => {
         failure = value

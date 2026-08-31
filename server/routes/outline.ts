@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express'
-import { generateOutlineWithMimo } from '../services/mimoOutlineService'
-import { MimoServiceError } from '../services/mimoResearchService'
+import { generateOutline } from '../services/outlineGenerationService'
+import { ResearchServiceError } from '../services/serviceError'
 import {
   completeOwnedOutline,
   failOwnedStage,
@@ -115,7 +115,7 @@ outlineRouter.post(
         { poolVersion },
       )
       stageStarted = true
-      const generated = await generateOutlineWithMimo(input)
+      const generated = await generateOutline(input)
       await completeOwnedOutline(
         ownerSessionId,
         input.taskId,
@@ -128,9 +128,9 @@ outlineRouter.post(
       if (stageStarted) {
         try {
           await failOwnedStage(ownerSessionId, input.taskId, 'outline', input.requestId, {
-            errorCode: error instanceof MimoServiceError ? error.code : 'INTERNAL_ERROR',
-            errorStatus: error instanceof MimoServiceError ? error.statusCode : 500,
-            errorMessage: error instanceof MimoServiceError
+            errorCode: error instanceof ResearchServiceError ? error.code : 'INTERNAL_ERROR',
+            errorStatus: error instanceof ResearchServiceError ? error.statusCode : 500,
+            errorMessage: error instanceof ResearchServiceError
               ? error.publicMessage
               : '研究大纲生成或保存失败。',
             failedAt: new Date().toISOString(),
@@ -139,8 +139,13 @@ outlineRouter.post(
           // Ignore stale cleanup attempts.
         }
       }
-      if (error instanceof MimoServiceError) {
-        console.error('[outline] MiMo request failed', { code: error.code, statusCode: error.statusCode })
+      if (error instanceof ResearchServiceError) {
+        console.error('[outline] generation request failed', {
+          provider: 'qwen',
+          code: error.code,
+          diagnosticCode: error.diagnosticCode,
+          statusCode: error.statusCode,
+        })
         if (error.retryAfterSeconds) {
           response.setHeader('Retry-After', String(error.retryAfterSeconds))
         }

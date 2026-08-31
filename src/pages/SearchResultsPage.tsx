@@ -213,7 +213,7 @@ export function SearchResultsPage() {
           <span className="section-label mt-5">Live Research</span>
           <h2 className="mt-2 text-xl font-semibold text-ink">准备开始真实联网研究</h2>
           <p className="mt-2 max-w-xl text-sm leading-6 text-ink-muted">
-            将根据当前研究计划中的目标与来源偏好执行 GLM 检索与网页阅读，再由 MiMo 综合分析。进入页面或刷新页面不会自动发起新任务。
+            将根据当前研究计划中的目标与来源偏好执行 GLM 检索与网页阅读，再由 AI 综合分析。进入页面或刷新页面不会自动发起新任务。
           </p>
           <p className="mt-2 text-xs font-medium text-primary-deep">
             本次目标检索 {state.task.targetSourceCount} 条

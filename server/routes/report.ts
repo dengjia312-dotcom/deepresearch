@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express'
-import { generateReportWithMimo } from '../services/mimoReportService'
-import { MimoServiceError } from '../services/mimoResearchService'
+import { generateReport } from '../services/reportGenerationService'
+import { ResearchServiceError } from '../services/serviceError'
 import {
   completeOwnedReport,
   failOwnedStage,
@@ -180,7 +180,7 @@ reportRouter.post(
         versions,
       )
       stageStarted = true
-      const generated = await generateReportWithMimo(input)
+      const generated = await generateReport(input)
       await completeOwnedReport(
         ownerSessionId,
         input.taskId,
@@ -193,9 +193,9 @@ reportRouter.post(
       if (stageStarted) {
         try {
           await failOwnedStage(ownerSessionId, input.taskId, 'report', input.requestId, {
-            errorCode: error instanceof MimoServiceError ? error.code : 'INTERNAL_ERROR',
-            errorStatus: error instanceof MimoServiceError ? error.statusCode : 500,
-            errorMessage: error instanceof MimoServiceError
+            errorCode: error instanceof ResearchServiceError ? error.code : 'INTERNAL_ERROR',
+            errorStatus: error instanceof ResearchServiceError ? error.statusCode : 500,
+            errorMessage: error instanceof ResearchServiceError
               ? error.publicMessage
               : '研究报告生成或保存失败。',
             failedAt: new Date().toISOString(),
@@ -204,8 +204,13 @@ reportRouter.post(
           // Ignore stale cleanup attempts.
         }
       }
-      if (error instanceof MimoServiceError) {
-        console.error('[report] MiMo request failed', { code: error.code, statusCode: error.statusCode })
+      if (error instanceof ResearchServiceError) {
+        console.error('[report] generation request failed', {
+          provider: 'qwen',
+          code: error.code,
+          diagnosticCode: error.diagnosticCode,
+          statusCode: error.statusCode,
+        })
         if (error.retryAfterSeconds) {
           response.setHeader('Retry-After', String(error.retryAfterSeconds))
         }

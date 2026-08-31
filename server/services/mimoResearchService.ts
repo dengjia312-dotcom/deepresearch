@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
 import type {
   MimoChatCompletionResponse,
-  ResearchErrorCode,
   ResearchInsight,
   ResearchRequest,
   ResearchResponse,
@@ -13,6 +12,8 @@ import {
   getAiConcurrencyRetryAfterSeconds,
   tryAcquireGlobalAiSlot,
 } from './aiConcurrency'
+import { ResearchServiceError as MimoServiceError } from './serviceError'
+export { ResearchServiceError as MimoServiceError } from './serviceError'
 
 const DEFAULT_BASE_URL = 'https://api.xiaomimimo.com/v1'
 const DEFAULT_MODEL = 'mimo-v2.5'
@@ -72,18 +73,6 @@ function getResearchRequestTimeoutMs() {
     'MIMO_RESEARCH_TIMEOUT_MS',
     DEFAULT_RESEARCH_REQUEST_TIMEOUT_MS,
   )
-}
-
-export class MimoServiceError extends Error {
-  constructor(
-    public readonly code: ResearchErrorCode,
-    public readonly statusCode: number,
-    public readonly publicMessage: string,
-    public readonly retryAfterSeconds?: number,
-  ) {
-    super(publicMessage)
-    this.name = 'MimoServiceError'
-  }
 }
 
 export function getMimoConfiguration(): MimoConfiguration {

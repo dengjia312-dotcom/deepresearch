@@ -156,7 +156,7 @@ export function ResearchPoolPage() {
 
       {state.outlineStatus === 'loading' && (
         <section className="ai-response-block mb-5 p-4" aria-live="polite">
-          <p className="text-sm font-semibold text-ink">MiMo 正在基于资料池生成真实大纲</p>
+          <p className="text-sm font-semibold text-ink">AI 正在基于资料池生成真实大纲</p>
           <p className="mt-2 text-xs text-ink-muted">{outlineProgressMessages[outlineProgressIndex]}</p>
         </section>
       )}

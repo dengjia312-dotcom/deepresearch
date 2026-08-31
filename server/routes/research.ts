@@ -1,7 +1,5 @@
 import { Router, type Request, type Response } from 'express'
-import {
-  MimoServiceError,
-} from '../services/mimoResearchService'
+import { ResearchServiceError } from '../services/serviceError'
 import { researchWithProviders } from '../services/researchService'
 import {
   completeOwnedResearch,
@@ -116,9 +114,9 @@ researchRouter.post(
             'research',
             researchRequest.requestId,
             {
-              errorCode: error instanceof MimoServiceError ? error.code : 'INTERNAL_ERROR',
-              errorStatus: error instanceof MimoServiceError ? error.statusCode : 500,
-              errorMessage: error instanceof MimoServiceError
+              errorCode: error instanceof ResearchServiceError ? error.code : 'INTERNAL_ERROR',
+              errorStatus: error instanceof ResearchServiceError ? error.statusCode : 500,
+              errorMessage: error instanceof ResearchServiceError
                 ? error.publicMessage
                 : '联网研究生成或保存失败。',
               failedAt: new Date().toISOString(),
@@ -128,7 +126,7 @@ researchRouter.post(
           // Ignore stale cleanup attempts; the response below still reports the original failure.
         }
       }
-      if (error instanceof MimoServiceError) {
+      if (error instanceof ResearchServiceError) {
         console.error('[research] provider request failed', {
           code: error.code,
           statusCode: error.statusCode,

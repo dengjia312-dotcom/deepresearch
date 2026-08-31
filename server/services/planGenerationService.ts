@@ -1,11 +1,9 @@
 import {
-  asString,
-  getAssistantContent,
-  isRecord,
-  MimoServiceError,
-  parseJsonObject,
-  requestMimo,
-} from './mimoResearchService'
+  generateContent,
+  parseGeneratedJson,
+} from './generation/generationService'
+import { ResearchServiceError } from './serviceError'
+import { asString, isRecord } from './serviceUtils'
 import type {
   PlanRequest,
   PlanResponse,
@@ -36,7 +34,7 @@ const depthEstimates: Record<
   professional: { estimatedSourceCount: 12, estimatedDurationMinutes: 15 },
 }
 
-export async function generatePlanWithMimo(
+export async function generatePlan(
   request: PlanRequest,
 ): Promise<PlanResponse> {
   const prompt = `请根据研究主题生成一份可执行的中文研究计划。
@@ -52,7 +50,7 @@ export async function generatePlanWithMimo(
 5. 不生成研究结论，不编造来源或数据；
 6. 仅输出 JSON：{"objective":"研究目标","scope":"研究范围","questions":["问题1","问题2"],"sourcePreferences":["官方资料","行业研究"]}`
 
-  const payload = await requestMimo({
+  const result = await generateContent('plan', {
     messages: [
       {
         role: 'system',
@@ -60,15 +58,13 @@ export async function generatePlanWithMimo(
       },
       { role: 'user', content: prompt },
     ],
-    max_completion_tokens: 2200,
+    maxCompletionTokens: 2200,
     temperature: 0.2,
-    stream: false,
-    thinking: { type: 'disabled' },
   })
 
-  const parsed = parseJsonObject(getAssistantContent(payload))
+  const parsed = parseGeneratedJson(result.content)
   if (!isRecord(parsed)) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的研究计划结构无效。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的研究计划结构无效。')
   }
 
   const objective = asString(parsed.objective)
@@ -95,7 +91,7 @@ export async function generatePlanWithMimo(
     || sourcePreferences.length < 2
     || sourcePreferences.length > 6
   ) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的研究计划字段不完整或格式异常。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的研究计划字段不完整或格式异常。')
   }
 
   return {

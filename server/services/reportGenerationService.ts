@@ -1,11 +1,9 @@
 import {
-  asString,
-  getAssistantContent,
-  isRecord,
-  MimoServiceError,
-  parseJsonObject,
-  requestMimo,
-} from './mimoResearchService'
+  generateContent,
+  parseGeneratedJson,
+} from './generation/generationService'
+import { ResearchServiceError } from './serviceError'
+import { asString, isRecord } from './serviceUtils'
 import type {
   ClaimType,
   ReportRequest,
@@ -60,11 +58,11 @@ function parseParagraphs(
 ) {
   const rawParagraphs = Array.isArray(value) ? value : []
   if (rawParagraphs.length < 1 || rawParagraphs.length > 12) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回了空章节或段落数量异常。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回了空章节或段落数量异常。')
   }
   return rawParagraphs.map((paragraph, index) => {
     if (!isRecord(paragraph)) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回了无效报告段落。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回了无效报告段落。')
     }
     const content = asString(paragraph.content)
     const sourceIds = Array.isArray(paragraph.sourceIds)
@@ -72,13 +70,13 @@ function parseParagraphs(
       : []
     const claimType = asString(paragraph.claimType) as ClaimType
     if (!content || content.length > 8000 || !claimTypes.has(claimType)) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回了空、过长或类型异常的报告段落。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回了空、过长或类型异常的报告段落。')
     }
     if (sourceIds.some((sourceId) => !allowedSourceIds.has(sourceId))) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 报告包含当前章节之外的引用。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 报告包含当前章节之外的引用。')
     }
     if (claimType === 'source_supported' && sourceIds.length === 0) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 将无引用内容错误标记为来源事实。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 将无引用内容错误标记为来源事实。')
     }
     return {
       id: `${sectionId}-paragraph-${index + 1}`,
@@ -94,14 +92,14 @@ function ensureNoRepeatedParagraphs(sections: ReportSection[]) {
   for (const paragraph of sections.flatMap((section) => section.paragraphs)) {
     const normalized = normalizedParagraph(paragraph.content)
     if (normalized.length >= 20 && seen.has(normalized)) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回了重复段落，已拒绝用重复内容填充字数。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回了重复段落，已拒绝用重复内容填充字数。')
     }
     seen.add(normalized)
   }
 }
 
 async function requestReportJson(prompt: string, maxCompletionTokens: number) {
-  const payload = await requestMimo({
+  const result = await generateContent('report', {
     messages: [
       {
         role: 'system',
@@ -109,12 +107,10 @@ async function requestReportJson(prompt: string, maxCompletionTokens: number) {
       },
       { role: 'user', content: prompt },
     ],
-    max_completion_tokens: maxCompletionTokens,
+    maxCompletionTokens,
     temperature: 0.2,
-    stream: false,
-    thinking: { type: 'disabled' },
   })
-  return parseJsonObject(getAssistantContent(payload))
+  return parseGeneratedJson(result.content)
 }
 
 function adjustmentInstruction(adjustment: LengthAdjustment) {
@@ -147,10 +143,11 @@ ${adjustmentInstruction(adjustment)}
 2. sourceIds 只能使用给定 id，不得生成不存在的引用；
 3. 直接证据标记 source_supported，跨来源归纳标记 synthesis，证据不足标记 uncertain；
 4. 不得重复段落凑字数，资料不足时缩小结论而不是强行扩写；
-5. 仅输出 JSON：{"report":{"title":"标题","executiveSummary":"执行摘要","sections":[{"id":"section-1","paragraphs":[{"content":"正文","sourceIds":["source-id"],"claimType":"source_supported|synthesis|uncertain"}]}],"conclusion":"总结","limitations":["研究限制"]},"warnings":[]}`
+5. 正文总长度尽量落在 ${request.targetMinWords}—${request.targetMaxWords} 字；完整论证、引用和自然结尾优先，不得截断已生成内容；
+6. 仅输出 JSON：{"report":{"title":"标题","executiveSummary":"执行摘要","sections":[{"id":"section-1","paragraphs":[{"content":"正文","sourceIds":["source-id"],"claimType":"source_supported|synthesis|uncertain"}]}],"conclusion":"总结","limitations":["研究限制"]},"warnings":[]}`
   const parsed = await requestReportJson(prompt, 6000)
   if (!isRecord(parsed) || !isRecord(parsed.report)) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的报告结构无效。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的报告结构无效。')
   }
   const title = asString(parsed.report.title)
   const executiveSummary = asString(parsed.report.executiveSummary)
@@ -166,24 +163,24 @@ ${adjustmentInstruction(adjustment)}
     || limitations.length === 0
     || rawSections.length !== request.outline.sections.length
   ) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的报告字段或章节数量异常。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的报告字段或章节数量异常。')
   }
   const seenSections = new Set<string>()
   const sections = rawSections.map((item) => {
     if (!isRecord(item)) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回了无效报告章节。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回了无效报告章节。')
     }
     const id = asString(item.id)
     const outlineSection = sectionById.get(id)
     if (!outlineSection || seenSections.has(id)) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 报告包含未知或重复章节。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 报告包含未知或重复章节。')
     }
     seenSections.add(id)
     const sectionSourceIds = new Set(outlineSection.sourceIds)
     const paragraphs = parseParagraphs(item.paragraphs, id, sectionSourceIds)
     if (paragraphs.some((paragraph) =>
       paragraph.sourceIds.some((sourceId) => !allowedSourceIds.has(sourceId)))) {
-      throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 报告包含资料池之外的引用。')
+      throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 报告包含资料池之外的引用。')
     }
     return { id, title: outlineSection.title, paragraphs }
   })
@@ -210,7 +207,7 @@ async function generateSection(
   const sectionSources = request.sources.filter((source) =>
     section.sourceIds.includes(source.id))
   if (sectionSources.length === 0) {
-    throw new MimoServiceError('INVALID_REQUEST', 400, `章节“${section.title}”没有可用来源。`)
+    throw new ResearchServiceError('INVALID_REQUEST', 400, `章节“${section.title}”没有可用来源。`)
   }
   const prompt = `请撰写研究报告的一个章节。只能使用本章节提供的来源，禁止联网和引入其他章节来源。
 
@@ -225,13 +222,14 @@ ${adjustmentInstruction(adjustment)}
 1. sourceIds 只能使用本章来源 id；
 2. 区分来源事实、跨来源综合和不确定判断；
 3. 一条来源时明确限制结论强度，不得用重复内容扩写；
-4. 仅输出 JSON：{"section":{"id":"${section.id}","paragraphs":[{"content":"正文","sourceIds":["source-id"],"claimType":"source_supported|synthesis|uncertain"}]}}`
+4. 本章正文尽量落在 ${targetMinWords}—${targetMaxWords} 字，保持完整结尾，不得截断；
+5. 仅输出 JSON：{"section":{"id":"${section.id}","paragraphs":[{"content":"正文","sourceIds":["source-id"],"claimType":"source_supported|synthesis|uncertain"}]}}`
   const parsed = await requestReportJson(
     prompt,
     Math.min(6000, Math.max(1800, targetMaxWords * 2)),
   )
   if (!isRecord(parsed) || !isRecord(parsed.section) || asString(parsed.section.id) !== section.id) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回了错误的报告章节。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回了错误的报告章节。')
   }
   return {
     id: section.id,
@@ -274,7 +272,7 @@ ${adjustmentInstruction(adjustment)}
 仅输出 JSON：{"title":"报告标题","executiveSummary":"执行摘要","conclusion":"总结","limitations":["研究限制"],"warnings":[]}`
   const parsed = await requestReportJson(prompt, 3000)
   if (!isRecord(parsed)) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的报告汇总结构无效。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的报告汇总结构无效。')
   }
   const title = asString(parsed.title)
   const executiveSummary = asString(parsed.executiveSummary)
@@ -283,7 +281,7 @@ ${adjustmentInstruction(adjustment)}
     ? parsed.limitations.map(asString).filter(Boolean).slice(0, 12)
     : []
   if (!title || !executiveSummary || !conclusion || limitations.length === 0) {
-    throw new MimoServiceError('MIMO_RESPONSE_INVALID', 502, 'MiMo 返回的执行摘要或总结不完整。')
+    throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的执行摘要或总结不完整。')
   }
   return {
     title,
@@ -365,7 +363,7 @@ async function generateByDepth(
     : generateSectionedReport(request, adjustment)
 }
 
-export async function generateReportWithMimo(
+export async function generateReport(
   request: ReportRequest,
 ): Promise<ReportResponse> {
   let generated = await generateByDepth(request, null)
@@ -397,7 +395,7 @@ export async function generateReportWithMimo(
         actualWordCount = adjustedWordCount
       }
     } catch (error) {
-      if (!(error instanceof MimoServiceError)) throw error
+      if (!(error instanceof ResearchServiceError)) throw error
       adjustmentFailureWarning = '长度修正请求失败，已保留首次生成的真实内容并标明实际字数。'
     }
   }
