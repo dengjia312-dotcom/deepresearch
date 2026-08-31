@@ -4,6 +4,7 @@ import { researchWithProviders } from '../services/researchService'
 import {
   completeOwnedResearch,
   failOwnedStage,
+  getOwnedResearchStrategy,
   startOwnedStage,
 } from '../db/repositories/taskRepository'
 import { getOwnerSessionId } from '../middleware/sessionOwner'
@@ -88,6 +89,13 @@ researchRouter.post(
     const ownerSessionId = getOwnerSessionId(response)
     let stageStarted = false
     try {
+      const researchStrategy = await getOwnedResearchStrategy(
+        ownerSessionId,
+        researchRequest.taskId,
+      )
+      const executionRequest = researchStrategy
+        ? { ...researchRequest, researchStrategy }
+        : researchRequest
       await startOwnedStage(
         ownerSessionId,
         researchRequest.taskId,
@@ -96,7 +104,7 @@ researchRouter.post(
         new Date().toISOString(),
       )
       stageStarted = true
-      const generated = await researchWithProviders(researchRequest)
+      const generated = await researchWithProviders(executionRequest)
       const persisted = toPersistedResearchResult(generated, researchRequest.topic)
       await completeOwnedResearch(
         ownerSessionId,

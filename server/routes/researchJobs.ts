@@ -4,6 +4,7 @@ import {
   createOrReuseOwnedResearchJob,
   getOwnedResearchJob,
 } from '../db/repositories/researchJobRepository'
+import { getOwnedResearchStrategy } from '../db/repositories/taskRepository'
 import { TaskNotFoundError } from '../db/errors'
 import { getOwnerSessionId } from '../middleware/sessionOwner'
 import { scheduleResearchJob } from '../services/researchJobService'
@@ -30,10 +31,14 @@ researchJobsRouter.post(
     }
     try {
       const ownerSessionId = getOwnerSessionId(response)
+      const researchStrategy = await getOwnedResearchStrategy(ownerSessionId, input.taskId)
+      const executionInput = researchStrategy
+        ? { ...input, researchStrategy }
+        : input
       const created = await createOrReuseOwnedResearchJob(
         ownerSessionId,
         randomUUID(),
-        input,
+        executionInput,
       )
       if (created.created) {
         console.info('[research-job] created', {
@@ -41,7 +46,11 @@ researchJobsRouter.post(
           taskId: input.taskId,
           requestId: input.requestId,
         })
-        scheduleResearchJob({ jobId: created.job.jobId, ownerSessionId, request: input })
+        scheduleResearchJob({
+          jobId: created.job.jobId,
+          ownerSessionId,
+          request: executionInput,
+        })
       }
       response.status(202).json({
         jobId: created.job.jobId,

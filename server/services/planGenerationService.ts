@@ -4,10 +4,16 @@ import {
 } from './generation/generationService'
 import { ResearchServiceError } from './serviceError'
 import { asString, isRecord } from './serviceUtils'
+import {
+  applyResearchStrategyGuardrails,
+  createFallbackResearchStrategy,
+  parseResearchStrategy,
+} from './researchStrategyService'
 import type {
   PlanRequest,
   PlanResponse,
   ResearchDepth,
+  ResearchStrategy,
 } from '../types/research'
 
 const allowedSourcePreferences = new Set([
@@ -34,10 +40,16 @@ const depthEstimates: Record<
   professional: { estimatedSourceCount: 12, estimatedDurationMinutes: 15 },
 }
 
-export async function generatePlan(
+export interface PlanGenerationBundle {
+  response: PlanResponse
+  researchStrategy: ResearchStrategy
+}
+
+export async function generatePlanBundle(
   request: PlanRequest,
-): Promise<PlanResponse> {
-  const prompt = `请根据研究主题生成一份可执行的中文研究计划。
+): Promise<PlanGenerationBundle> {
+  const startedAt = Date.now()
+  const prompt = `请根据研究主题一次性生成中文研究计划、轻量研究意图和检索计划。
 
 研究主题：${request.topic}
 研究深度：${request.depth}
@@ -48,7 +60,11 @@ export async function generatePlan(
 3. questions 提供 3 至 8 个互不重复的核心研究问题；
 4. sourcePreferences 只能从以下选项选择 2 至 6 项：权威报告、官方资料、行业研究、学术论文、司法案例、企业案例、用户研究、专业媒体、内部资料；
 5. 不生成研究结论，不编造来源或数据；
-6. 仅输出 JSON：{"objective":"研究目标","scope":"研究范围","questions":["问题1","问题2"],"sourcePreferences":["官方资料","行业研究"]}`
+6. researchIntent 必须结合上下文消除主题歧义，明确研究对象、范围和需要排除的其他含义；非歧义主题的 ambiguityDetected 必须为 false，excludedMeanings 保持为空或很短；
+7. queryPlan 生成 2 至 4 条角度不同的检索语句，不能只是同一句改写。查询先保证研究对象正确，再自然考虑来源偏好，不得机械拼接全部 sourcePreferences；
+8. 对明显垂直领域可使用少量行业关键词，但不要硬编码域名或生成站点列表；
+9. 仅输出 JSON，不要 Markdown：
+{"plan":{"objective":"研究目标","scope":"研究范围","questions":["问题1","问题2","问题3"],"sourcePreferences":["官方资料","行业研究"]},"researchIntent":{"normalizedTopic":"规范主题","researchObject":"研究对象","userIntent":"用户意图","scope":["范围"],"excludedMeanings":["排除含义"],"keyConcepts":["关键概念"],"ambiguityDetected":false},"queryPlan":{"queries":[{"query":"检索语句","purpose":"研究角度","priority":1}]}}`
 
   const result = await generateContent('plan', {
     messages: [
@@ -58,7 +74,7 @@ export async function generatePlan(
       },
       { role: 'user', content: prompt },
     ],
-    maxCompletionTokens: 2200,
+    maxCompletionTokens: 3200,
     temperature: 0.2,
   })
 
@@ -67,14 +83,15 @@ export async function generatePlan(
     throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的研究计划结构无效。')
   }
 
-  const objective = asString(parsed.objective)
-  const scope = asString(parsed.scope)
-  const rawQuestions = Array.isArray(parsed.questions) ? parsed.questions : []
+  const parsedPlan = isRecord(parsed.plan) ? parsed.plan : parsed
+  const objective = asString(parsedPlan.objective)
+  const scope = asString(parsedPlan.scope)
+  const rawQuestions = Array.isArray(parsedPlan.questions) ? parsedPlan.questions : []
   const questions = rawQuestions
     .map(asString)
     .filter(Boolean)
-  const sourcePreferences = Array.isArray(parsed.sourcePreferences)
-    ? [...new Set(parsed.sourcePreferences.map(asString).filter((item) =>
+  const sourcePreferences = Array.isArray(parsedPlan.sourcePreferences)
+    ? [...new Set(parsedPlan.sourcePreferences.map(asString).filter((item) =>
         allowedSourcePreferences.has(item)))]
     : []
 
@@ -94,7 +111,7 @@ export async function generatePlan(
     throw new ResearchServiceError('AI_GENERATION_RESPONSE_INVALID', 502, 'AI 返回的研究计划字段不完整或格式异常。')
   }
 
-  return {
+  const response: PlanResponse = {
     taskId: request.taskId,
     requestId: request.requestId,
     mode: 'live',
@@ -111,4 +128,26 @@ export async function generatePlan(
     },
     generatedAt: new Date().toISOString(),
   }
+  const strategySeed = { topic: request.topic, goal: objective, scope }
+  const researchStrategy = applyResearchStrategyGuardrails(
+    parseResearchStrategy(parsed) ?? createFallbackResearchStrategy(strategySeed),
+    strategySeed,
+  )
+  const durationMs = Date.now() - startedAt
+  console.info('[research:intent] completed', {
+    ambiguityDetected: researchStrategy.intent.ambiguityDetected,
+    scopeCount: researchStrategy.intent.scope.length,
+    excludedMeaningCount: researchStrategy.intent.excludedMeanings.length,
+    durationMs,
+  })
+  console.info('[research:query-plan] completed', {
+    queryCount: researchStrategy.queryPlan.queries.length,
+    purposes: researchStrategy.queryPlan.queries.map((query) => query.purpose),
+    durationMs,
+  })
+  return { response, researchStrategy }
+}
+
+export async function generatePlan(request: PlanRequest): Promise<PlanResponse> {
+  return (await generatePlanBundle(request)).response
 }

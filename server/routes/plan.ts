@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express'
-import { generatePlan } from '../services/planGenerationService'
+import { generatePlanBundle } from '../services/planGenerationService'
 import { ResearchServiceError } from '../services/serviceError'
 import {
   completeOwnedPlan,
@@ -67,13 +67,14 @@ planRouter.post(
         new Date().toISOString(),
       )
       stageStarted = true
-      const generated = await generatePlan(input)
+      const generated = await generatePlanBundle(input)
       const plan = toPersistedPlan(
-        generated,
+        generated.response,
         currentTask.state.task.usesPrototypeData,
+        generated.researchStrategy,
       )
       await completeOwnedPlan(ownerSessionId, input.taskId, input.requestId, plan)
-      response.json(generated)
+      response.json(generated.response)
     } catch (error) {
       if (stageStarted) {
         try {

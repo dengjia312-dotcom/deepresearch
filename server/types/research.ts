@@ -5,6 +5,34 @@ export interface ResearchRequest {
   goal: string
   sourcePreferences: string[]
   targetSourceCount: number
+  /** Server-owned metadata. Public routes ignore any client-provided value. */
+  researchStrategy?: ResearchStrategy
+}
+
+export interface ResearchIntent {
+  normalizedTopic: string
+  researchObject: string
+  userIntent: string
+  scope: string[]
+  excludedMeanings: string[]
+  keyConcepts: string[]
+  ambiguityDetected: boolean
+}
+
+export interface SearchQuery {
+  id: string
+  query: string
+  purpose: string
+  priority: number
+}
+
+export interface SearchQueryPlan {
+  queries: SearchQuery[]
+}
+
+export interface ResearchStrategy {
+  intent: ResearchIntent
+  queryPlan: SearchQueryPlan
 }
 
 export type ResearchDepth = 'quick' | 'deep' | 'professional'
@@ -98,6 +126,7 @@ export type ResearchErrorCode =
   | 'MIMO_NETWORK_ERROR'
   | 'MIMO_RESPONSE_INVALID'
   | 'RESEARCH_SEARCH_FAILED'
+  | 'NO_RELEVANT_SOURCES'
   | 'RESEARCH_JOB_INTERRUPTED'
   | 'NO_REAL_SOURCES'
   | 'MIMO_UPSTREAM_ERROR'

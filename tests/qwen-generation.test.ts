@@ -7,7 +7,10 @@ import {
   requestQwenGeneration,
 } from '../server/services/generation/qwenGenerationProvider'
 import { generateOutline } from '../server/services/outlineGenerationService'
-import { generatePlan } from '../server/services/planGenerationService'
+import {
+  generatePlan,
+  generatePlanBundle,
+} from '../server/services/planGenerationService'
 import { generateReport } from '../server/services/reportGenerationService'
 import { synthesizeResearchResponse } from '../server/services/researchSynthesisService'
 import { ResearchServiceError } from '../server/services/serviceError'
@@ -112,6 +115,17 @@ test('统一任务策略保持模型选择并只为 Report 开启 medium reasoni
   })
 })
 
+test('语义 relevance 使用 Flash 且关闭推理', async () => {
+  await withMockedQwen({}, async (bodies) => {
+    await generateContent('relevance', {
+      messages: [{ role: 'user', content: 'test' }],
+      maxCompletionTokens: 100,
+    })
+    assert.equal(bodies[0]?.model, 'qwen-test-fast')
+    assert.equal(bodies[0]?.reasoning_effort, 'none')
+  })
+})
+
 test('Qwen started/completed 日志包含安全 reasoning policy 与 token 摘要', async () => {
   const infoLogs: Array<[unknown, unknown]> = []
   await withMockedQwen({
@@ -158,6 +172,50 @@ test('Plan 严格 JSON 可以按原 schema 解析', async () => {
     assert.equal(result.plan.questions.length, 3)
     assert.equal(result.mode, 'live')
     assert.equal(result.dataSource, 'real')
+  })
+})
+
+test('Plan 单次 Flash 同时产出内部 Intent 与 QueryPlan 且公开响应不变', async () => {
+  await withMockedQwen({
+    response: completion(JSON.stringify({
+      plan: {
+        objective: '分析环境设计专业发展、就业与能力变化',
+        scope: '环境设计专业及室内、景观和空间设计行业',
+        questions: ['行业如何发展？', '就业岗位如何变化？', 'AI带来什么影响？'],
+        sourcePreferences: ['行业研究', '专业媒体'],
+      },
+      researchIntent: {
+        normalizedTopic: '环境设计专业与空间设计行业未来发展',
+        researchObject: '环境设计专业及空间设计行业',
+        userIntent: '分析行业趋势、就业前景与AI影响',
+        scope: ['环境设计专业', '室内设计', '景观设计', '空间设计'],
+        excludedMeanings: ['生态环境', '环境科学', '环境治理'],
+        keyConcepts: ['环境设计专业', '室内设计', '景观设计', 'AI'],
+        ambiguityDetected: true,
+      },
+      queryPlan: {
+        queries: [
+          { query: '环境设计专业 就业前景 行业趋势', purpose: '就业与趋势', priority: 1 },
+          { query: '室内设计 景观设计 空间设计 未来', purpose: '垂直方向', priority: 2 },
+          { query: 'AI 数字化 环境设计行业', purpose: '技术变化', priority: 3 },
+        ],
+      },
+    })),
+  }, async (bodies) => {
+    const bundle = await generatePlanBundle({
+      taskId: 'task-a',
+      requestId: 'request-plan-rich',
+      topic: '环境设计的未来',
+      depth: 'deep',
+    })
+    assert.equal(bodies.length, 1)
+    assert.equal(bodies[0]?.model, 'qwen-test-fast')
+    assert.equal(bodies[0]?.reasoning_effort, 'none')
+    assert.match(bundle.researchStrategy.intent.normalizedTopic, /环境设计专业/)
+    assert.equal(bundle.researchStrategy.queryPlan.queries.length, 4)
+    assert.deepEqual(Object.keys(bundle.response).sort(), [
+      'dataSource', 'generatedAt', 'mode', 'plan', 'requestId', 'taskId',
+    ])
   })
 })
 

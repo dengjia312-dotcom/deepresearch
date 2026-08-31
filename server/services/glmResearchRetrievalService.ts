@@ -1,11 +1,16 @@
 import type {
+  ResearchIntent,
   ResearchEvidenceType,
   ResearchRequest,
+  ResearchStrategy,
   ResearchSynthesisEvidence,
+  SearchQuery,
   VerifiedSearchMetadata,
 } from '../types/research'
 import { ResearchServiceError } from './serviceError'
 import { asString, isRecord } from './serviceUtils'
+import { generateContent, parseGeneratedJson } from './generation/generationService'
+import { resolveResearchStrategy } from './researchStrategyService'
 import {
   getAiConcurrencyRetryAfterSeconds,
   tryAcquireGlobalAiSlot,
@@ -14,10 +19,13 @@ import {
 const DEFAULT_GLM_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4'
 const GLM_REQUEST_TIMEOUT_MS = 30_000
 const GLM_READER_TIMEOUT_SECONDS = 20
-const MAX_SEARCH_CANDIDATES = 12
+const SEARCH_RESULTS_PER_QUERY = 6
+const MAX_SEARCH_CANDIDATES = 16
 const MAX_READER_SOURCES = 8
 const MAX_EVIDENCE_CONTENT_LENGTH = 6000
 const DEFAULT_READER_CONCURRENCY = 3
+const DEFAULT_SEARCH_QUERY_CONCURRENCY = 2
+const MAX_SEARCH_QUERY_CONCURRENCY = 3
 
 export const FULL_TEXT_MIN_LENGTH = 1000
 export const PARTIAL_TEXT_MIN_LENGTH = 300
@@ -79,6 +87,29 @@ interface SearchMappingResult {
   deduplicatedMetadata: VerifiedSearchMetadata[]
 }
 
+type SourceRelevance = 'high' | 'medium' | 'low' | 'uncertain'
+type SourceCategory =
+  | 'official'
+  | 'industry_media'
+  | 'professional_platform'
+  | 'research_report'
+  | 'company'
+  | 'community'
+  | 'recruitment'
+
+interface SearchCandidate extends VerifiedSearchMetadata {
+  candidateId: string
+  matchedQueryIds: string[]
+  sourceCategory: SourceCategory
+  relevance: SourceRelevance
+}
+
+interface SearchQueryResult {
+  query: SearchQuery
+  mapped: SearchMappingResult | null
+  error: unknown | null
+}
+
 interface ReaderDependencies {
   concurrency?: number
   readSource?: typeof readResearchSourceWithGlm
@@ -114,12 +145,7 @@ function normalizeHttpUrl(value: string) {
 }
 
 function buildGlmSearchQuery(request: ResearchRequest) {
-  const preferences = request.sourcePreferences.join('、').slice(0, 16)
-  return [
-    request.topic.slice(0, 24),
-    request.goal.slice(0, 28),
-    preferences,
-  ].filter(Boolean).join(' ').slice(0, 70)
+  return resolveResearchStrategy(request).queryPlan.queries[0]!.query
 }
 
 async function requestGlmJson(
@@ -235,82 +261,292 @@ function mapGlmSearchResults(payload: unknown): SearchMappingResult | null {
   }
 }
 
-function prioritizeResearchCandidates(
-  metadata: VerifiedSearchMetadata[],
-  sourcePreferences: string[],
-) {
-  const preferences = sourcePreferences.map((item) => item.trim().toLowerCase()).filter(Boolean)
-  return metadata
-    .map((source, index) => {
-      const searchable = `${source.title} ${source.publisher} ${source.snippet}`.toLowerCase()
-      const preferenceMatch = preferences.some((preference) => searchable.includes(preference))
-      return { source, index, preferenceMatch }
-    })
-    .sort((left, right) => (
-      Number(right.preferenceMatch) - Number(left.preferenceMatch)
-      || left.index - right.index
-    ))
-    .map((item) => item.source)
+function classifySourceCategory(source: VerifiedSearchMetadata): SourceCategory {
+  const hostname = new URL(source.url).hostname.toLocaleLowerCase()
+  const text = `${hostname} ${source.publisher} ${source.title}`.toLocaleLowerCase()
+  if (/\.gov\.|\.gov\.cn$|政府|部委|委员会/.test(text)) return 'official'
+  if (/招聘|岗位|职位|人才|career|jobs?|zhaopin|liepin|boss/.test(text)) return 'recruitment'
+  if (/研究院|研究报告|白皮书|智库|大学|高校|\.edu\.|arxiv/.test(text)) return 'research_report'
+  if (/论坛|社区|问答|知乎|reddit|community/.test(text)) return 'community'
+  if (/协会|专业平台|建筑|设计|开发者/.test(text)) return 'professional_platform'
+  if (/公司|集团|企业|inc\.|corp\.|company/.test(text)) return 'company'
+  return 'industry_media'
 }
 
-export async function searchResearchSourcesWithGlm(request: ResearchRequest) {
-  const maxAttempts = 2
-  const searchStartedAt = Date.now()
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const startedAt = Date.now()
-    console.info('[research:glm-search] started', { attempt })
+function relevanceByRule(
+  source: VerifiedSearchMetadata,
+  intent: ResearchIntent,
+): SourceRelevance {
+  const searchable = `${source.title} ${source.publisher} ${source.snippet.slice(0, 800)}`
+    .toLocaleLowerCase()
+  const concepts = intent.keyConcepts
+    .map((concept) => concept.trim().toLocaleLowerCase())
+    .filter((concept) => concept.length >= 2)
+  const excluded = intent.excludedMeanings
+    .map((meaning) => meaning.trim().toLocaleLowerCase())
+    .filter((meaning) => meaning.length >= 2)
+  const positiveMatches = concepts.filter((concept) => searchable.includes(concept)).length
+  const excludedMatch = excluded.some((meaning) => searchable.includes(meaning))
+  if (excludedMatch && positiveMatches === 0) return 'low'
+  if (excludedMatch) return 'uncertain'
+  if (positiveMatches >= 2) return 'high'
+  if (positiveMatches === 1) return 'medium'
+  return intent.ambiguityDetected ? 'uncertain' : 'medium'
+}
+
+async function classifyUncertainCandidatesWithFlash(
+  candidates: SearchCandidate[],
+  intent: ResearchIntent,
+) {
+  if (candidates.length === 0) return new Map<string, Exclude<SourceRelevance, 'uncertain'>>()
+  const compactSources = candidates.map((source) => ({
+    sourceId: source.candidateId,
+    title: source.title.slice(0, 240),
+    snippet: source.snippet.slice(0, 500),
+    publisher: source.publisher.slice(0, 120),
+  }))
+  try {
+    const result = await generateContent('relevance', {
+      messages: [
+        {
+          role: 'system',
+          content: '你是研究资料相关度分类器。只判断候选来源是否直接服务于给定研究对象，不得联网，不得补充来源。',
+        },
+        {
+          role: 'user',
+          content: `研究对象：${intent.researchObject}\n用户意图：${intent.userIntent}\n关键概念：${intent.keyConcepts.join('、')}\n需要排除的含义：${intent.excludedMeanings.join('、') || '无'}\n候选来源：${JSON.stringify(compactSources)}\n\n仅输出 JSON：{"classifications":[{"sourceId":"candidate-1","relevance":"high|medium|low","reason":"简短原因"}]}`,
+        },
+      ],
+      maxCompletionTokens: 2400,
+      temperature: 0.1,
+    })
+    const parsed = parseGeneratedJson(result.content)
+    const values = Array.isArray(parsed.classifications) ? parsed.classifications : []
+    const allowedIds = new Set(candidates.map((candidate) => candidate.candidateId))
+    const classifications = new Map<string, Exclude<SourceRelevance, 'uncertain'>>()
+    values.forEach((value) => {
+      if (!isRecord(value)) return
+      const sourceId = asString(value.sourceId)
+      const relevance = asString(value.relevance)
+      if (
+        allowedIds.has(sourceId)
+        && (relevance === 'high' || relevance === 'medium' || relevance === 'low')
+      ) classifications.set(sourceId, relevance)
+    })
+    return classifications
+  } catch (error) {
+    console.warn('[research:relevance] classification failed', {
+      candidateCount: candidates.length,
+      errorCode: error instanceof ResearchServiceError ? error.code : 'INTERNAL_ERROR',
+    })
+    return new Map<string, Exclude<SourceRelevance, 'uncertain'>>()
+  }
+}
+
+function sourcePreferenceScore(category: SourceCategory, preferences: string[]) {
+  const joined = preferences.join(' ')
+  if (category === 'official' && /权威|官方/.test(joined)) return 1
+  if (category === 'research_report' && /报告|研究|学术/.test(joined)) return 1
+  if (category === 'company' && /企业|案例/.test(joined)) return 1
+  if ((category === 'industry_media' || category === 'professional_platform') && /媒体|行业/.test(joined)) return 1
+  if (category === 'community' && /用户/.test(joined)) return 1
+  return 0
+}
+
+function selectDiverseCandidates(
+  candidates: SearchCandidate[],
+  sourcePreferences: string[],
+  limit: number,
+) {
+  const sorted = candidates.slice().sort((left, right) => (
+    Number(right.relevance === 'high') - Number(left.relevance === 'high')
+    || sourcePreferenceScore(right.sourceCategory, sourcePreferences)
+      - sourcePreferenceScore(left.sourceCategory, sourcePreferences)
+    || right.matchedQueryIds.length - left.matchedQueryIds.length
+  ))
+  const selected: SearchCandidate[] = []
+  const selectedIds = new Set<string>()
+  const categories = [...new Set(sorted.map((source) => source.sourceCategory))]
+  categories.forEach((category) => {
+    const source = sorted.find((candidate) => candidate.sourceCategory === category)
+    if (source && selected.length < limit) {
+      selected.push(source)
+      selectedIds.add(source.candidateId)
+    }
+  })
+  sorted.forEach((source) => {
+    if (selected.length < limit && !selectedIds.has(source.candidateId)) {
+      selected.push(source)
+      selectedIds.add(source.candidateId)
+    }
+  })
+  return selected
+}
+
+async function executeSearchQuery(query: SearchQuery): Promise<SearchQueryResult> {
+  const startedAt = Date.now()
+  console.info('[research:glm-search] started', { queryId: query.id })
+  try {
     const response = await requestGlmJson('/web_search', {
-      search_query: buildGlmSearchQuery(request),
+      search_query: query.query,
       search_engine: 'search_std',
       search_intent: false,
-      count: Math.min(16, Math.max(request.targetSourceCount, 12)),
+      count: SEARCH_RESULTS_PER_QUERY,
       search_recency_filter: 'noLimit',
       content_size: 'high',
     })
     if (!response.ok) throw createGlmSearchHttpError(response.httpStatus)
-
-    const mapped = mapGlmSearchResults(response.payload)
-    if (!mapped) {
+    const rawMapped = mapGlmSearchResults(response.payload)
+    if (!rawMapped) {
       throw new ResearchServiceError(
         'RESEARCH_SEARCH_FAILED',
         502,
         'GLM Web Search 返回格式异常。',
       )
     }
+    const mapped = {
+      ...rawMapped,
+      deduplicatedMetadata: rawMapped.deduplicatedMetadata.slice(
+        0,
+        SEARCH_RESULTS_PER_QUERY,
+      ),
+    }
     console.info('[research:glm-search] completed', {
-      attempt,
+      queryId: query.id,
       resultCount: mapped.actualSourceCount,
       validSourceCount: mapped.validSourceCount,
-      deduplicatedSourceCount: mapped.deduplicatedMetadata.length,
       durationMs: Date.now() - startedAt,
     })
+    return { query, mapped, error: null }
+  } catch (error) {
+    console.warn('[research:glm-search] query failed', {
+      queryId: query.id,
+      errorCode: error instanceof ResearchServiceError ? error.code : 'INTERNAL_ERROR',
+      durationMs: Date.now() - startedAt,
+    })
+    return { query, mapped: null, error }
+  }
+}
 
-    if (mapped.deduplicatedMetadata.length > 0) {
-      const maxCandidates = Math.min(MAX_SEARCH_CANDIDATES, request.targetSourceCount)
-      return {
-        actualSourceCount: mapped.actualSourceCount,
-        deduplicatedSourceCount: mapped.deduplicatedMetadata.length,
-        metadata: prioritizeResearchCandidates(
-          mapped.deduplicatedMetadata,
-          request.sourcePreferences,
-        ).slice(0, maxCandidates),
-      }
-    }
-    if (attempt < maxAttempts) {
-      console.warn('[research:glm-search] empty result, retrying', { attempt })
+async function executeSearchQueries(queries: SearchQuery[], concurrency: number) {
+  const results: SearchQueryResult[] = new Array(queries.length)
+  let nextIndex = 0
+  async function worker() {
+    while (nextIndex < queries.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await executeSearchQuery(queries[index]!)
     }
   }
+  await Promise.all(Array.from(
+    { length: Math.min(concurrency, queries.length) },
+    () => worker(),
+  ))
+  return results
+}
 
-  console.error('[research:glm-search] failed', {
-    attempts: 2,
-    errorCode: 'NO_REAL_SOURCES',
-    durationMs: Date.now() - searchStartedAt,
-  })
-  throw new ResearchServiceError(
-    'NO_REAL_SOURCES',
-    502,
-    'GLM Web Search 未返回可验证的真实来源。',
+export async function searchResearchSourcesWithGlm(
+  request: ResearchRequest,
+  strategy: ResearchStrategy = resolveResearchStrategy(request),
+) {
+  const startedAt = Date.now()
+  const queries = strategy.queryPlan.queries.slice(0, 4)
+  const concurrency = Math.min(
+    MAX_SEARCH_QUERY_CONCURRENCY,
+    getPositiveInteger('GLM_SEARCH_QUERY_CONCURRENCY', DEFAULT_SEARCH_QUERY_CONCURRENCY),
   )
+  const results = await executeSearchQueries(queries, concurrency)
+  const successful = results.filter((result) => !result.error && result.mapped)
+  const failedCount = results.length - successful.length
+  if (successful.length === 0) {
+    throw new ResearchServiceError(
+      'RESEARCH_SEARCH_FAILED',
+      502,
+      '全部联网检索请求均失败，请稍后手动重试当前研究步骤。',
+    )
+  }
+
+  const actualSourceCount = successful.reduce(
+    (sum, result) => sum + result.mapped!.actualSourceCount,
+    0,
+  )
+  const validUrlCount = successful.reduce(
+    (sum, result) => sum + result.mapped!.validSourceCount,
+    0,
+  )
+  const unique = new Map<string, Omit<SearchCandidate, 'candidateId' | 'relevance'>>()
+  successful.forEach(({ query, mapped }) => {
+    mapped!.deduplicatedMetadata.forEach((source) => {
+      const existing = unique.get(source.url)
+      if (existing) {
+        existing.matchedQueryIds = [...new Set([...existing.matchedQueryIds, query.id])]
+        return
+      }
+      unique.set(source.url, {
+        ...source,
+        matchedQueryIds: [query.id],
+        sourceCategory: classifySourceCategory(source),
+      })
+    })
+  })
+  if (unique.size === 0) {
+    throw new ResearchServiceError(
+      'NO_REAL_SOURCES',
+      502,
+      'GLM Web Search 未返回可验证的真实来源。',
+    )
+  }
+
+  const candidates = [...unique.values()].map<SearchCandidate>((source, index) => ({
+    ...source,
+    candidateId: `candidate-${index + 1}`,
+    relevance: relevanceByRule(source, strategy.intent),
+  }))
+  const uncertain = candidates.filter((source) => source.relevance === 'uncertain')
+  const semanticClassifications = await classifyUncertainCandidatesWithFlash(
+    uncertain,
+    strategy.intent,
+  )
+  uncertain.forEach((source) => {
+    source.relevance = semanticClassifications.get(source.candidateId) ?? 'low'
+  })
+  const accepted = candidates.filter(
+    (source) => source.relevance === 'high' || source.relevance === 'medium',
+  )
+  const rejectedCount = candidates.length - accepted.length
+  if (accepted.length === 0) {
+    throw new ResearchServiceError(
+      'NO_RELEVANT_SOURCES',
+      502,
+      '联网检索返回了真实网页，但没有与当前研究对象足够相关的来源。',
+    )
+  }
+  const maxCandidates = Math.min(
+    MAX_SEARCH_CANDIDATES,
+    Math.max(12, request.targetSourceCount),
+  )
+  const metadata = selectDiverseCandidates(
+    accepted,
+    request.sourcePreferences,
+    maxCandidates,
+  )
+  console.info('[research:multi-search] completed', {
+    queryCount: queries.length,
+    rawResultCount: actualSourceCount,
+    validUrlCount,
+    deduplicatedCount: unique.size,
+    relevanceAcceptedCount: accepted.length,
+    relevanceRejectedCount: rejectedCount,
+    durationMs: Date.now() - startedAt,
+  })
+  return {
+    actualSourceCount,
+    deduplicatedSourceCount: unique.size,
+    metadata,
+    warnings: failedCount > 0
+      ? [`${failedCount} 个检索方向暂时失败，已使用其余成功检索结果继续研究。`]
+      : [],
+  }
 }
 
 function classifyReaderContent(contentLength: number): GlmReaderStatus {
@@ -502,9 +738,10 @@ export async function enrichResearchSourcesWithGlm(
 
 export async function retrieveResearchSourcesWithGlm(
   request: ResearchRequest,
+  strategy: ResearchStrategy = resolveResearchStrategy(request),
   hooks: GlmResearchProgressHooks = {},
 ): Promise<GlmResearchRetrievalResult> {
-  const search = await searchResearchSourcesWithGlm(request)
+  const search = await searchResearchSourcesWithGlm(request, strategy)
   await hooks.onSearchCompleted?.(search.metadata.length)
   await hooks.onReaderStarted?.(Math.min(MAX_READER_SOURCES, search.metadata.length))
   const reader = await enrichResearchSourcesWithGlm(search.metadata, {
@@ -513,7 +750,7 @@ export async function retrieveResearchSourcesWithGlm(
   return {
     ...search,
     evidenceSources: reader.evidenceSources,
-    warnings: reader.warnings,
+    warnings: [...search.warnings, ...reader.warnings],
     readerStats: reader.readerStats,
   }
 }
@@ -525,4 +762,8 @@ export const glmResearchRetrievalTestApi = {
   maxEvidenceContentLength: MAX_EVIDENCE_CONTENT_LENGTH,
   maxReaderSources: MAX_READER_SOURCES,
   maxSearchCandidates: MAX_SEARCH_CANDIDATES,
+  searchResultsPerQuery: SEARCH_RESULTS_PER_QUERY,
+  maxSearchQueryConcurrency: MAX_SEARCH_QUERY_CONCURRENCY,
+  relevanceByRule,
+  classifySourceCategory,
 }

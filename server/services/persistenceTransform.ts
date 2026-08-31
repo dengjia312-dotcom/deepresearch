@@ -11,7 +11,12 @@ import type {
   PlanResponse,
   ReportResponse,
   ResearchResponse,
+  ResearchStrategy,
 } from '../types/research'
+
+export interface PersistedResearchPlan extends ResearchPlan {
+  _researchStrategy?: ResearchStrategy
+}
 
 function normalizeHttpUrl(value: string) {
   try {
@@ -44,7 +49,8 @@ function mapLiveSourceKind(type: string): SourceKind {
 export function toPersistedPlan(
   response: PlanResponse,
   usesPrototypeData: boolean,
-): ResearchPlan {
+  researchStrategy?: ResearchStrategy,
+): PersistedResearchPlan {
   return {
     objective: response.plan.objective.trim(),
     scope: response.plan.scope.trim(),
@@ -59,6 +65,7 @@ export function toPersistedPlan(
     dataSource: 'real',
     updatedAt: response.generatedAt,
     confirmedAt: null,
+    ...(researchStrategy ? { _researchStrategy: researchStrategy } : {}),
   }
 }
 

@@ -33,8 +33,20 @@ import type {
   ResearchJobProgress,
   ResearchJobStatus,
 } from '../../types/researchJob'
+import type { ResearchStrategy } from '../../types/research'
+import { parseResearchStrategy } from '../../services/researchStrategyService'
 
 type Queryable = Pool | PoolClient
+
+interface StoredResearchPlan extends ResearchPlan {
+  _researchStrategy?: ResearchStrategy
+}
+
+function toPublicResearchPlan(plan: StoredResearchPlan | undefined): ResearchPlan | null {
+  if (!plan) return null
+  const { _researchStrategy: _internalStrategy, ...publicPlan } = plan
+  return publicPlan
+}
 
 interface TaskRow extends QueryResultRow {
   task_id: string
@@ -178,6 +190,19 @@ export async function getOwnedTaskDetail(
   return getOwnedTaskDetailFromDatabase(pool, ownerSessionId, taskId)
 }
 
+export async function getOwnedResearchStrategy(
+  ownerSessionId: string,
+  taskId: string,
+  pool: Pool = getDatabasePool(),
+) {
+  await selectOwnedTask(pool, ownerSessionId, taskId)
+  const result = await pool.query<{ payload: StoredResearchPlan }>(
+    'SELECT payload FROM research_plans WHERE task_id = $1',
+    [taskId],
+  )
+  return parseResearchStrategy(result.rows[0]?.payload?._researchStrategy)
+}
+
 async function getOwnedTaskDetailFromDatabase(
   database: Queryable,
   ownerSessionId: string,
@@ -188,7 +213,7 @@ async function getOwnedTaskDetailFromDatabase(
   const stagesResult = await database.query<StageRow>(
     'SELECT * FROM research_task_stages WHERE task_id = $1', [taskId],
   )
-  const planResult = await database.query<{ payload: ResearchPlan }>(
+  const planResult = await database.query<{ payload: StoredResearchPlan }>(
     'SELECT payload FROM research_plans WHERE task_id = $1', [taskId],
   )
   const researchResult = await database.query<{ payload: LiveResearchResult; searched_at: Date | string }>(
@@ -240,7 +265,7 @@ async function getOwnedTaskDetailFromDatabase(
   const state: PersistedResearchStateDto = {
     version: 3,
     task: toResearchTask(task),
-    researchPlan: planResult.rows[0]?.payload ?? null,
+    researchPlan: toPublicResearchPlan(planResult.rows[0]?.payload),
     planMode: plan.mode,
     planStatus: plan.status,
     planError: plan.lastErrorMessage,
@@ -866,13 +891,24 @@ export async function saveOwnedPlan(
 ) {
   return withTransaction(async (client) => {
     await selectOwnedTask(client, ownerSessionId, taskId, true)
+    let planPayload: StoredResearchPlan = plan
+    if (!invalidateDownstream) {
+      const existing = await client.query<{ payload: StoredResearchPlan }>(
+        'SELECT payload FROM research_plans WHERE task_id = $1',
+        [taskId],
+      )
+      const researchStrategy = parseResearchStrategy(
+        existing.rows[0]?.payload?._researchStrategy,
+      )
+      if (researchStrategy) planPayload = { ...plan, _researchStrategy: researchStrategy }
+    }
     await client.query(`
       INSERT INTO research_plans(task_id, payload, data_source, confirmed_at, created_at, updated_at)
       VALUES ($1, $2, $3, $4, now(), now())
       ON CONFLICT (task_id) DO UPDATE
       SET payload = EXCLUDED.payload, data_source = EXCLUDED.data_source,
           confirmed_at = EXCLUDED.confirmed_at, updated_at = now()
-    `, [taskId, plan, plan.dataSource, plan.confirmedAt])
+    `, [taskId, planPayload, plan.dataSource, plan.confirmedAt])
     if (invalidateDownstream) await resetDownstreamFromPlan(client, taskId)
     await client.query(`
       UPDATE research_task_stages

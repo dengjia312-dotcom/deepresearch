@@ -16,6 +16,7 @@ import { ResearchServiceError } from '../server/services/serviceError'
 import { researchWithProviders } from '../server/services/researchService'
 import type {
   ResearchRequest,
+  ResearchStrategy,
   ResearchSynthesisEvidence,
   VerifiedSearchMetadata,
 } from '../server/types/research'
@@ -75,7 +76,9 @@ async function withMockedProviders<T>(
     GLM_BASE_URL: process.env.GLM_BASE_URL,
     QWEN_API_KEY: process.env.QWEN_API_KEY,
     QWEN_BASE_URL: process.env.QWEN_BASE_URL,
+    QWEN_FAST_MODEL: process.env.QWEN_FAST_MODEL,
     QWEN_STRONG_MODEL: process.env.QWEN_STRONG_MODEL,
+    GLM_SEARCH_QUERY_CONCURRENCY: process.env.GLM_SEARCH_QUERY_CONCURRENCY,
   }
   const originalInfo = console.info
   const originalWarn = console.warn
@@ -85,7 +88,9 @@ async function withMockedProviders<T>(
   process.env.GLM_BASE_URL = 'https://glm.test/api/paas/v4'
   process.env.QWEN_API_KEY = 'test-qwen-key'
   process.env.QWEN_BASE_URL = 'https://qwen.test/v1'
+  process.env.QWEN_FAST_MODEL = 'qwen-test-fast'
   process.env.QWEN_STRONG_MODEL = 'qwen-test-strong'
+  process.env.GLM_SEARCH_QUERY_CONCURRENCY = '2'
   console.info = () => undefined
   console.warn = () => undefined
   console.error = () => undefined
@@ -104,31 +109,33 @@ async function withMockedProviders<T>(
   }
 }
 
-test('GLM Search 12 个结果按官方字段映射为统一来源元数据', async () => {
-  let requestBody: Record<string, unknown> | null = null
+test('GLM Multi-query 每条取 6 个结果并跨 Query URL 去重', async () => {
+  const requestBodies: Record<string, unknown>[] = []
   await withMockedProviders(async (_input, init) => {
-    requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+    requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>)
     return new Response(JSON.stringify(searchPayload()), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
   }, async () => {
     const result = await searchResearchSourcesWithGlm(request)
-    assert.equal(result.actualSourceCount, 12)
-    assert.equal(result.deduplicatedSourceCount, 12)
-    assert.equal(result.metadata.length, 12)
-    assert.deepEqual(result.metadata[0], {
-      url: 'https://source-1.example.com/article',
-      title: '来源 1',
-      publisher: '研究机构 1',
-      publishedAt: '2026-08-29',
-      snippet: '行业研究内容 1'.repeat(30),
-    })
-    assert.ok(requestBody)
-    assert.equal(requestBody.search_engine, 'search_std')
-    assert.equal(requestBody.content_size, 'high')
-    assert.equal(requestBody.count, 12)
-    assert.match(String(requestBody.search_query), /C端产品经理基础/)
+    assert.equal(result.actualSourceCount, 48)
+    assert.equal(result.deduplicatedSourceCount, 6)
+    assert.equal(result.metadata.length, 6)
+    assert.equal(result.metadata[0]?.url, 'https://source-1.example.com/article')
+    assert.equal(result.metadata[0]?.title, '来源 1')
+    assert.equal(result.metadata[0]?.publisher, '研究机构 1')
+    assert.equal(result.metadata[0]?.publishedAt, '2026-08-29')
+    assert.equal(result.metadata[0]?.snippet, '行业研究内容 1'.repeat(30))
+    assert.deepEqual(
+      (result.metadata[0] as VerifiedSearchMetadata & { matchedQueryIds: string[] }).matchedQueryIds,
+      ['query-1', 'query-2', 'query-3', 'query-4'],
+    )
+    assert.equal(requestBodies.length, 4)
+    assert.ok(requestBodies.every((body) => body.search_engine === 'search_std'))
+    assert.ok(requestBodies.every((body) => body.content_size === 'high'))
+    assert.ok(requestBodies.every((body) => body.count === 6))
+    assert.equal(new Set(requestBodies.map((body) => body.search_query)).size, 4)
   })
 })
 
@@ -331,15 +338,33 @@ test('每条 Reader 正文送入 Synthesis 前最多保留 6000 字符', async (
   )
 })
 
-test('Qwen Synthesis prompt 只包含给定证据且生成请求不使用搜索工具', () => {
+test('Qwen Synthesis prompt 接收规范主题上下文且不使用搜索工具', () => {
   const evidence: ResearchSynthesisEvidence = {
     ...metadata(1),
     sourceId: 'source-1',
     evidenceType: 'full_text',
     content: '正文证据',
   }
-  const prompt = buildResearchSynthesisPrompt(request, [evidence])
+  const prompt = buildResearchSynthesisPrompt({
+    ...request,
+    researchStrategy: {
+      intent: {
+        normalizedTopic: 'C端产品经理能力体系',
+        researchObject: '中国互联网C端产品经理岗位',
+        userIntent: request.goal,
+        scope: ['能力模型'],
+        excludedMeanings: [],
+        keyConcepts: ['C端产品经理'],
+        ambiguityDetected: false,
+      },
+      queryPlan: { queries: [
+        { id: 'query-1', query: 'C端产品经理 能力模型', purpose: '能力', priority: 1 },
+        { id: 'query-2', query: 'C端产品经理 用户研究', purpose: '用户研究', priority: 2 },
+      ] },
+    },
+  }, [evidence])
   assert.match(prompt, /正文证据/)
+  assert.match(prompt, /中国互联网C端产品经理岗位/)
   assert.doesNotMatch(prompt, /web_search|force_search/)
 })
 
@@ -406,7 +431,7 @@ test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 so
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }, async () => {
     const result = await researchWithProviders(request)
-    assert.equal(readerCount, 8)
+    assert.equal(readerCount, 6)
     assert.equal(generationBodies.length, 1)
     assert.equal(generationBodies[0]?.tools, undefined)
     assert.equal(generationBodies[0]?.reasoning_effort, 'none')
@@ -426,13 +451,13 @@ test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 so
       'validSourceCount',
       'warnings',
     ])
-    assert.equal(result.sources.length, 12)
+    assert.equal(result.sources.length, 6)
     assert.doesNotMatch(JSON.stringify(result.sources), /reader-private-content/)
     assert.ok(result.sources.every((item) => item.summary.length <= 600))
   })
 })
 
-test('GLM Search HTTP 失败不重试且不会自动切换 mock', async () => {
+test('全部 GLM Query HTTP 失败才使 Research Search 失败且不切换 mock', async () => {
   let fetchCount = 0
   await withMockedProviders(async () => {
     fetchCount += 1
@@ -446,7 +471,7 @@ test('GLM Search HTTP 失败不重试且不会自动切换 mock', async () => {
       (error: unknown) => error instanceof ResearchServiceError
         && error.code === 'RESEARCH_SEARCH_FAILED',
     )
-    assert.equal(fetchCount, 1)
+    assert.equal(fetchCount, 4)
   })
 
   const serviceSource = readFileSync(
@@ -456,7 +481,7 @@ test('GLM Search HTTP 失败不重试且不会自动切换 mock', async () => {
   assert.doesNotMatch(serviceSource, /USE_MOCK|searchResearchSourcesWithMimo/)
 })
 
-test('GLM Search HTTP 200 但零有效来源时只重试一次', async () => {
+test('GLM Multi-query 全部返回空结果时不无限补搜', async () => {
   let fetchCount = 0
   await withMockedProviders(async () => {
     fetchCount += 1
@@ -470,6 +495,137 @@ test('GLM Search HTTP 200 但零有效来源时只重试一次', async () => {
       (error: unknown) => error instanceof ResearchServiceError
         && error.code === 'NO_REAL_SOURCES',
     )
-    assert.equal(fetchCount, 2)
+    assert.equal(fetchCount, 4)
   })
+})
+
+test('单个 Query 失败不阻断其他 Query 的聚合结果', async () => {
+  let fetchCount = 0
+  await withMockedProviders(async (_input, init) => {
+    fetchCount += 1
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>
+    if (String(body.search_query).includes('风险')) {
+      return new Response('{}', {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify(searchPayload(4)), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }, async () => {
+    const result = await searchResearchSourcesWithGlm(request)
+    assert.equal(fetchCount, 4)
+    assert.equal(result.metadata.length, 4)
+    assert.equal(result.warnings.length, 1)
+  })
+})
+
+test('Multi-query 聚合记录 query origin、过滤 low 并让 Flash 判定规则冲突来源', async () => {
+  const strategy: ResearchStrategy = {
+    intent: {
+      normalizedTopic: '环境设计专业与空间设计行业未来发展',
+      researchObject: '环境设计专业及空间设计行业',
+      userIntent: '分析就业、趋势和AI影响',
+      scope: ['环境设计专业', '室内设计', '景观设计'],
+      excludedMeanings: ['生态环境', '环境科学', '环境治理', '污染治理'],
+      keyConcepts: ['环境设计专业', '室内设计', '景观设计', '空间设计', 'AI'],
+      ambiguityDetected: true,
+    },
+    queryPlan: { queries: [
+      { id: 'query-1', query: '环境设计专业 就业趋势', purpose: '就业', priority: 1 },
+      { id: 'query-2', query: '室内设计 景观设计 趋势', purpose: '行业', priority: 2 },
+      { id: 'query-3', query: 'AI 环境设计行业', purpose: '技术', priority: 3 },
+      { id: 'query-4', query: '环境设计 招聘 能力', purpose: '能力', priority: 4 },
+    ] },
+  }
+  let qwenCallCount = 0
+  await withMockedProviders(async (input) => {
+    if (String(input).endsWith('/chat/completions')) {
+      qwenCallCount += 1
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          classifications: [{
+            sourceId: 'candidate-3',
+            relevance: 'medium',
+            reason: '同时涉及专业语义，需要保留',
+          }],
+        }) } }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    return new Response(JSON.stringify({
+      search_result: [
+        searchItem(1, {
+          title: '环境设计专业与室内设计就业趋势',
+          content: '环境设计专业、室内设计和景观设计行业岗位变化分析。',
+        }),
+        searchItem(2, {
+          title: '生态环境治理与污染防治',
+          content: '生态环境、环境科学和污染治理政策。',
+        }),
+        searchItem(3, {
+          title: '生态环境背景下的环境设计专业改革',
+          content: '讨论环境设计专业课程与空间设计能力。',
+        }),
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }, async () => {
+    const result = await searchResearchSourcesWithGlm(
+      { ...request, topic: '环境设计的未来', researchStrategy: strategy },
+      strategy,
+    )
+    assert.equal(qwenCallCount, 1)
+    assert.equal(result.deduplicatedSourceCount, 3)
+    assert.equal(result.metadata.length, 2)
+    assert.ok(result.metadata.every((source) => !/污染防治/.test(source.title)))
+    const withOrigins = result.metadata as Array<VerifiedSearchMetadata & { matchedQueryIds: string[] }>
+    assert.ok(withOrigins.every((source) => source.matchedQueryIds.length === 4))
+  })
+})
+
+test('GLM Query 并发默认不超过 2', async () => {
+  let active = 0
+  let maxActive = 0
+  await withMockedProviders(async () => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    active -= 1
+    return new Response(JSON.stringify(searchPayload(2)), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }, async () => {
+    await searchResearchSourcesWithGlm(request)
+    assert.equal(maxActive, 2)
+  })
+})
+
+test('规则判定只让 high/medium 候选进入后续 Reader', async () => {
+  const relevant = metadata(1)
+  const irrelevant = metadata(2)
+  assert.ok(
+    ['high', 'medium'].includes(glmResearchRetrievalTestApi.relevanceByRule(relevant, {
+      normalizedTopic: '来源 1',
+      researchObject: '来源 1',
+      userIntent: '测试',
+      scope: ['来源 1'],
+      excludedMeanings: ['来源 2'],
+      keyConcepts: ['来源 1', '行业研究内容 1'],
+      ambiguityDetected: true,
+    })),
+  )
+  assert.equal(
+    glmResearchRetrievalTestApi.relevanceByRule(irrelevant, {
+      normalizedTopic: '来源 1',
+      researchObject: '来源 1',
+      userIntent: '测试',
+      scope: ['来源 1'],
+      excludedMeanings: ['来源 2'],
+      keyConcepts: ['来源 1'],
+      ambiguityDetected: true,
+    }),
+    'low',
+  )
 })

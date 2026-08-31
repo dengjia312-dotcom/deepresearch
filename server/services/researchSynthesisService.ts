@@ -153,6 +153,7 @@ export function buildResearchSynthesisPrompt(
   request: ResearchRequest,
   evidenceSources: ResearchSynthesisEvidence[],
 ) {
+  const intent = request.researchStrategy?.intent
   const sources = evidenceSources.map((source) => ({
     sourceId: source.sourceId,
     title: source.title,
@@ -164,6 +165,9 @@ export function buildResearchSynthesisPrompt(
   }))
   return `请基于以下已经验证的真实来源证据，完成“${request.topic}”的中文研究综合。
 研究目标：${request.goal}
+规范研究主题：${intent?.normalizedTopic ?? request.topic}
+研究对象：${intent?.researchObject ?? request.topic}
+用户意图：${intent?.userIntent ?? request.goal}
 
 只能使用给定来源，不得联网，不得新增、猜测或改写 URL。每条洞察的 sourceUrls 只能从给定来源的 url 中选择。evidenceType 表示证据来自完整正文、部分正文或搜索摘要。
 

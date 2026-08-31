@@ -4,6 +4,7 @@ import {
   type GlmReaderStatus,
 } from './glmResearchRetrievalService'
 import { synthesizeResearchResponse } from './researchSynthesisService'
+import { resolveResearchStrategy } from './researchStrategyService'
 
 export interface ResearchExecutionHooks {
   onSearchStarted?: () => Promise<void> | void
@@ -20,14 +21,28 @@ export async function researchWithProviders(
   hooks: ResearchExecutionHooks = {},
 ): Promise<ResearchResponse> {
   await hooks.onSearchStarted?.()
-  const retrieval = await retrieveResearchSourcesWithGlm(request, {
+  const strategyStartedAt = Date.now()
+  const strategy = resolveResearchStrategy(request)
+  console.info('[research:intent] completed', {
+    ambiguityDetected: strategy.intent.ambiguityDetected,
+    scopeCount: strategy.intent.scope.length,
+    excludedMeaningCount: strategy.intent.excludedMeanings.length,
+    durationMs: Date.now() - strategyStartedAt,
+  })
+  console.info('[research:query-plan] completed', {
+    queryCount: strategy.queryPlan.queries.length,
+    purposes: strategy.queryPlan.queries.map((query) => query.purpose),
+    durationMs: Date.now() - strategyStartedAt,
+  })
+  const executionRequest = { ...request, researchStrategy: strategy }
+  const retrieval = await retrieveResearchSourcesWithGlm(executionRequest, strategy, {
     onSearchCompleted: hooks.onSearchCompleted,
     onReaderStarted: hooks.onReaderStarted,
     onReaderCompleted: hooks.onReaderCompleted,
   })
   await hooks.onSynthesisStarted?.()
   return synthesizeResearchResponse(
-    request,
+    executionRequest,
     retrieval.metadata,
     retrieval.evidenceSources,
     {
