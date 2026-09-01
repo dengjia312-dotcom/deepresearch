@@ -1,5 +1,6 @@
 import type {
   ResearchIntent,
+  ResearchAgentSourceType,
   ResearchEvidenceType,
   ResearchRequest,
   ResearchStrategy,
@@ -88,19 +89,10 @@ interface SearchMappingResult {
 }
 
 type SourceRelevance = 'high' | 'medium' | 'low' | 'uncertain'
-type SourceCategory =
-  | 'official'
-  | 'industry_media'
-  | 'professional_platform'
-  | 'research_report'
-  | 'company'
-  | 'community'
-  | 'recruitment'
-
-interface SearchCandidate extends VerifiedSearchMetadata {
+export interface GlmSearchCandidate extends VerifiedSearchMetadata {
   candidateId: string
   matchedQueryIds: string[]
-  sourceCategory: SourceCategory
+  sourceCategory: ResearchAgentSourceType
   relevance: SourceRelevance
 }
 
@@ -261,16 +253,17 @@ function mapGlmSearchResults(payload: unknown): SearchMappingResult | null {
   }
 }
 
-function classifySourceCategory(source: VerifiedSearchMetadata): SourceCategory {
+function classifySourceCategory(source: VerifiedSearchMetadata): ResearchAgentSourceType {
   const hostname = new URL(source.url).hostname.toLocaleLowerCase()
   const text = `${hostname} ${source.publisher} ${source.title}`.toLocaleLowerCase()
   if (/\.gov\.|\.gov\.cn$|政府|部委|委员会/.test(text)) return 'official'
   if (/招聘|岗位|职位|人才|career|jobs?|zhaopin|liepin|boss/.test(text)) return 'recruitment'
-  if (/研究院|研究报告|白皮书|智库|大学|高校|\.edu\.|arxiv/.test(text)) return 'research_report'
+  if (/研究院|研究报告|白皮书|智库|大学|高校|学术|论文|\.edu\.|arxiv/.test(text)) return 'academic'
   if (/论坛|社区|问答|知乎|reddit|community/.test(text)) return 'community'
-  if (/协会|专业平台|建筑|设计|开发者/.test(text)) return 'professional_platform'
+  if (/协会|专业平台|建筑|设计|开发者/.test(text)) return 'professional'
   if (/公司|集团|企业|inc\.|corp\.|company/.test(text)) return 'company'
-  return 'industry_media'
+  if (/新闻|日报|周刊|news|times|post|media/.test(text)) return 'news'
+  return 'general_web'
 }
 
 function relevanceByRule(
@@ -295,7 +288,7 @@ function relevanceByRule(
 }
 
 async function classifyUncertainCandidatesWithFlash(
-  candidates: SearchCandidate[],
+  candidates: GlmSearchCandidate[],
   intent: ResearchIntent,
 ) {
   if (candidates.length === 0) return new Map<string, Exclude<SourceRelevance, 'uncertain'>>()
@@ -343,18 +336,18 @@ async function classifyUncertainCandidatesWithFlash(
   }
 }
 
-function sourcePreferenceScore(category: SourceCategory, preferences: string[]) {
+function sourcePreferenceScore(category: ResearchAgentSourceType, preferences: string[]) {
   const joined = preferences.join(' ')
   if (category === 'official' && /权威|官方/.test(joined)) return 1
-  if (category === 'research_report' && /报告|研究|学术/.test(joined)) return 1
+  if (category === 'academic' && /报告|研究|学术/.test(joined)) return 1
   if (category === 'company' && /企业|案例/.test(joined)) return 1
-  if ((category === 'industry_media' || category === 'professional_platform') && /媒体|行业/.test(joined)) return 1
+  if ((category === 'news' || category === 'professional') && /媒体|行业/.test(joined)) return 1
   if (category === 'community' && /用户/.test(joined)) return 1
   return 0
 }
 
 function selectDiverseCandidates(
-  candidates: SearchCandidate[],
+  candidates: GlmSearchCandidate[],
   sourcePreferences: string[],
   limit: number,
 ) {
@@ -364,7 +357,7 @@ function selectDiverseCandidates(
       - sourcePreferenceScore(left.sourceCategory, sourcePreferences)
     || right.matchedQueryIds.length - left.matchedQueryIds.length
   ))
-  const selected: SearchCandidate[] = []
+  const selected: GlmSearchCandidate[] = []
   const selectedIds = new Set<string>()
   const categories = [...new Set(sorted.map((source) => source.sourceCategory))]
   categories.forEach((category) => {
@@ -448,9 +441,10 @@ async function executeSearchQueries(queries: SearchQuery[], concurrency: number)
 export async function searchResearchSourcesWithGlm(
   request: ResearchRequest,
   strategy: ResearchStrategy = resolveResearchStrategy(request),
+  queriesOverride?: SearchQuery[],
 ) {
   const startedAt = Date.now()
-  const queries = strategy.queryPlan.queries.slice(0, 4)
+  const queries = (queriesOverride ?? strategy.queryPlan.queries).slice(0, 4)
   const concurrency = Math.min(
     MAX_SEARCH_QUERY_CONCURRENCY,
     getPositiveInteger('GLM_SEARCH_QUERY_CONCURRENCY', DEFAULT_SEARCH_QUERY_CONCURRENCY),
@@ -474,7 +468,7 @@ export async function searchResearchSourcesWithGlm(
     (sum, result) => sum + result.mapped!.validSourceCount,
     0,
   )
-  const unique = new Map<string, Omit<SearchCandidate, 'candidateId' | 'relevance'>>()
+  const unique = new Map<string, Omit<GlmSearchCandidate, 'candidateId' | 'relevance'>>()
   successful.forEach(({ query, mapped }) => {
     mapped!.deduplicatedMetadata.forEach((source) => {
       const existing = unique.get(source.url)
@@ -497,7 +491,7 @@ export async function searchResearchSourcesWithGlm(
     )
   }
 
-  const candidates = [...unique.values()].map<SearchCandidate>((source, index) => ({
+  const candidates = [...unique.values()].map<GlmSearchCandidate>((source, index) => ({
     ...source,
     candidateId: `candidate-${index + 1}`,
     relevance: relevanceByRule(source, strategy.intent),

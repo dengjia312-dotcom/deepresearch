@@ -418,6 +418,15 @@ test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 so
     }
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>
     generationBodies.push(body)
+    if (generationBodies.length === 1) {
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify({
+          status: 'sufficient',
+          evidenceNeeds: [],
+          followUpQueries: [],
+        }) } }],
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
     return new Response(JSON.stringify({
       choices: [{ message: { content: JSON.stringify({
         summary: '研究摘要',
@@ -432,7 +441,7 @@ test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 so
   }, async () => {
     const result = await researchWithProviders(request)
     assert.equal(readerCount, 6)
-    assert.equal(generationBodies.length, 1)
+    assert.equal(generationBodies.length, 2)
     assert.equal(generationBodies[0]?.tools, undefined)
     assert.equal(generationBodies[0]?.reasoning_effort, 'none')
     assert.deepEqual(Object.keys(result).sort(), [

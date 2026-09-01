@@ -1,8 +1,10 @@
-import type { ResearchRequest, ResearchResponse } from '../types/research'
-import {
-  retrieveResearchSourcesWithGlm,
-  type GlmReaderStatus,
-} from './glmResearchRetrievalService'
+import type {
+  ResearchAgentCheckpoint,
+  ResearchRequest,
+  ResearchResponse,
+} from '../types/research'
+import type { GlmReaderStatus } from './glmResearchRetrievalService'
+import { runResearchAgent } from './researchAgentService'
 import { synthesizeResearchResponse } from './researchSynthesisService'
 import { resolveResearchStrategy } from './researchStrategyService'
 
@@ -11,6 +13,8 @@ export interface ResearchExecutionHooks {
   onSearchCompleted?: (validSourceCount: number) => Promise<void> | void
   onReaderStarted?: (readerTargetCount: number) => Promise<void> | void
   onReaderCompleted?: (status: GlmReaderStatus) => Promise<void> | void
+  assertCurrent?: () => Promise<void> | void
+  onAgentCheckpoint?: (checkpoint: ResearchAgentCheckpoint) => Promise<void> | void
   onSynthesisStarted?: () => Promise<void> | void
   onSynthesisParsed?: () => Promise<void> | void
   onResponseBuilt?: () => Promise<void> | void
@@ -35,11 +39,14 @@ export async function researchWithProviders(
     durationMs: Date.now() - strategyStartedAt,
   })
   const executionRequest = { ...request, researchStrategy: strategy }
-  const retrieval = await retrieveResearchSourcesWithGlm(executionRequest, strategy, {
+  const retrieval = await runResearchAgent(executionRequest, strategy, {
+    assertCurrent: hooks.assertCurrent,
+    onCheckpoint: hooks.onAgentCheckpoint,
     onSearchCompleted: hooks.onSearchCompleted,
     onReaderStarted: hooks.onReaderStarted,
     onReaderCompleted: hooks.onReaderCompleted,
   })
+  await hooks.assertCurrent?.()
   await hooks.onSynthesisStarted?.()
   return synthesizeResearchResponse(
     executionRequest,

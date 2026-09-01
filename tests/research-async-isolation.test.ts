@@ -167,6 +167,17 @@ test('Research Job loading 状态持久化后可恢复轮询且不影响其他�
       partialCount: 1,
       insufficientCount: 0,
       readerFailedCount: 0,
+      agent: {
+        currentRound: 2,
+        maxRounds: 2,
+        replanCount: 1,
+        phase: 'round_read',
+        evaluationStatus: 'insufficient',
+        evidenceNeedCount: 2,
+        satisfiedEvidenceNeedCount: 1,
+        followUpQueryCount: 2,
+        evidenceCount: 11,
+      },
     },
   })
   const taskA = workspace.tasksById['task-A']!
@@ -178,6 +189,9 @@ test('Research Job loading 状态持久化后可恢复轮询且不影响其他�
   assert.equal(restored.requests.research.requestId, 'A-job-r1')
   assert.equal(restored.researchJobPhase, 'reading')
   assert.equal(restored.researchJobProgress?.readerCompletedCount, 3)
+  assert.equal(restored.researchJobProgress?.agent?.currentRound, 2)
+  assert.equal(restored.researchJobProgress?.agent?.phase, 'round_read')
+  assert.equal(restored.researchJobProgress?.agent?.evidenceCount, 11)
   assert.equal(workspace.tasksById['task-B']?.researchJobId, null)
 })
 

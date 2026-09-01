@@ -25,14 +25,21 @@ import {
 import { InvalidCitationError, StaleTaskWriteError, TaskNotFoundError, TaskOwnershipConflictError } from '../server/db/errors'
 import {
   completeResearchJob,
+  assertResearchJobStillCurrent,
   createOrReuseOwnedResearchJob,
   getOwnedResearchJob,
   incrementResearchJobReaderProgress,
   markResearchJobRunning,
   recoverInterruptedResearchJobs,
   setResearchJobPhase,
+  updateResearchJobAgentCheckpoint,
 } from '../server/db/repositories/researchJobRepository'
-import type { ResearchRequest, ResearchResponse, ResearchStrategy } from '../server/types/research'
+import type {
+  ResearchAgentCheckpoint,
+  ResearchRequest,
+  ResearchResponse,
+  ResearchStrategy,
+} from '../server/types/research'
 import type {
   LiveOutlineResult,
   LiveReportResult,
@@ -492,10 +499,67 @@ pgTest('Research Job 同 task/request 幂等且只归所属 session 可读', asy
   assert.equal(first.created, true)
   assert.equal(duplicate.created, false)
   assert.equal(duplicate.job.jobId, first.job.jobId)
+  assert.equal(duplicate.executionRequest, null)
   await assert.rejects(
     () => getOwnedResearchJob(otherOwnerId, first.job.jobId, pool),
     TaskNotFoundError,
   )
+})
+
+for (const status of ['running', 'completed', 'failed'] as const) {
+  pgTest(`Research Job ${status} 状态下相同 requestId 复用原 Job`, async () => {
+    const ownerId = await owner()
+    const detail = await researchReady(ownerId)
+    const input = jobRequest(detail.state.task.id)
+    const first = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
+    if (status === 'running') {
+      await markResearchJobRunning(first.job.jobId, pool)
+    } else {
+      await pool.query(`
+        UPDATE research_jobs
+        SET status = $2, phase = $2, completed_at = now(), updated_at = now()
+        WHERE id = $1
+      `, [first.job.jobId, status])
+    }
+
+    const duplicate = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
+    const count = await pool.query<{ count: string }>(`
+      SELECT count(*)::text AS count
+      FROM research_jobs
+      WHERE owner_session_id = $1 AND task_id = $2 AND request_id = $3
+    `, [ownerId, input.taskId, input.requestId])
+
+    assert.equal(duplicate.created, false)
+    assert.equal(duplicate.executionRequest, null)
+    assert.equal(duplicate.job.jobId, first.job.jobId)
+    assert.equal(duplicate.job.status, status)
+    assert.equal(count.rows[0]?.count, '1')
+  })
+}
+
+pgTest('Research Job 终态后使用新 requestId 仍创建新 Job', async () => {
+  const ownerId = await owner()
+  const detail = await researchReady(ownerId)
+  const firstInput = jobRequest(detail.state.task.id, 'terminal-request')
+  const first = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), firstInput, pool)
+  await pool.query(`
+    UPDATE research_jobs
+    SET status = 'completed', phase = 'completed', completed_at = now(), updated_at = now()
+    WHERE id = $1
+  `, [first.job.jobId])
+
+  const nextInput = jobRequest(detail.state.task.id, 'new-request')
+  const next = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), nextInput, pool)
+  const count = await pool.query<{ count: string }>(`
+    SELECT count(*)::text AS count
+    FROM research_jobs
+    WHERE owner_session_id = $1 AND task_id = $2
+  `, [ownerId, detail.state.task.id])
+
+  assert.equal(next.created, true)
+  assert.notEqual(next.executionRequest, null)
+  assert.notEqual(next.job.jobId, first.job.jobId)
+  assert.equal(count.rows[0]?.count, '2')
 })
 
 pgTest('Research Job 保存真实阶段进度并与任务结果原子完成', async () => {
@@ -527,6 +591,66 @@ pgTest('Research Job 保存真实阶段进度并与任务结果原子完成', as
   assert.equal(restored.state.searchStatus, 'success')
   assert.equal(restored.state.researchJobId, createdJob.job.jobId)
   assert.deepEqual(restored.state.liveResearchResult, persisted)
+})
+
+pgTest('Agent checkpoint 使用 progress JSONB 持久化、公开脱敏并受 requestId stale 保护', async () => {
+  const ownerId = await owner()
+  const detail = await researchReady(ownerId)
+  const input = jobRequest(detail.state.task.id, 'agent-request-old')
+  const createdJob = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
+  await markResearchJobRunning(createdJob.job.jobId, pool)
+  const identity = {
+    jobId: createdJob.job.jobId,
+    ownerSessionId: ownerId,
+    taskId: input.taskId,
+    requestId: input.requestId,
+  }
+  const checkpoint: ResearchAgentCheckpoint = {
+    version: 1,
+    currentRound: 2,
+    maxRounds: 2,
+    replanCount: 1,
+    maxReplans: 1,
+    phase: 'round_search',
+    evaluationStatus: 'insufficient',
+    evidenceNeeds: [{
+      id: 'need-1', label: '内部缺口', description: '内部描述',
+      relatedQuestionIds: ['q-1'], status: 'open', supportingEvidenceIds: [],
+    }],
+    followUpQueries: [{
+      id: 'follow-up-r2-1', query: '内部完整查询', purpose: '内部目的',
+      priority: 1, round: 2, evidenceNeedIds: ['need-1'],
+    }],
+    evidenceCount: 4,
+    updatedAt: new Date().toISOString(),
+  }
+  await updateResearchJobAgentCheckpoint(identity, checkpoint, pool)
+  await setResearchJobPhase(identity.jobId, 'searching', { validSourceCount: 7 }, pool)
+  await setResearchJobPhase(identity.jobId, 'reading', { readerTargetCount: 2 }, pool)
+  await incrementResearchJobReaderProgress(identity.jobId, 'full_text', pool)
+  const raw = await pool.query<{ progress: { agentState?: ResearchAgentCheckpoint } }>(
+    'SELECT progress FROM research_jobs WHERE id = $1',
+    [identity.jobId],
+  )
+  assert.deepEqual(raw.rows[0]?.progress.agentState, checkpoint)
+  const publicJob = await getOwnedResearchJob(ownerId, identity.jobId, pool)
+  assert.equal(publicJob.progress.agent?.followUpQueryCount, 1)
+  assert.doesNotMatch(JSON.stringify(publicJob.progress), /内部完整查询|内部缺口|内部描述/)
+
+  await createOrReuseOwnedResearchJob(
+    ownerId,
+    randomUUID(),
+    jobRequest(detail.state.task.id, 'agent-request-new'),
+    pool,
+  )
+  await assert.rejects(
+    () => assertResearchJobStillCurrent(identity, pool),
+    StaleTaskWriteError,
+  )
+  await assert.rejects(
+    () => updateResearchJobAgentCheckpoint(identity, checkpoint, pool),
+    StaleTaskWriteError,
+  )
 })
 
 pgTest('旧 requestId Job 完成不能覆盖更新请求', async () => {

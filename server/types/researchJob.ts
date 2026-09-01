@@ -1,4 +1,4 @@
-import type { ResearchResponse } from './research'
+import type { ResearchAgentCheckpoint, ResearchAgentPhase, ResearchResponse } from './research'
 
 export type ResearchJobStatus = 'queued' | 'running' | 'completed' | 'failed'
 export type ResearchJobPhase =
@@ -12,13 +12,15 @@ export type ResearchJobPhase =
 export type ResearchJobFailurePoint =
   | 'job_start'
   | 'research_execute'
+  | 'evidence_evaluate'
+  | 'replan_generate'
   | 'synthesis_parse'
   | 'response_build'
   | 'persist_task'
   | 'persist_job_complete'
   | 'persist_job_failed'
 
-export interface ResearchJobProgress {
+export interface ResearchJobCounterProgress {
   validSourceCount: number
   readerTargetCount: number
   readerCompletedCount: number
@@ -26,6 +28,26 @@ export interface ResearchJobProgress {
   partialCount: number
   insufficientCount: number
   readerFailedCount: number
+}
+
+export interface PublicResearchAgentProgress {
+  currentRound: 1 | 2
+  maxRounds: 2
+  replanCount: 0 | 1
+  phase: ResearchAgentPhase
+  evaluationStatus: ResearchAgentCheckpoint['evaluationStatus']
+  evidenceNeedCount: number
+  satisfiedEvidenceNeedCount: number
+  followUpQueryCount: number
+  evidenceCount: number
+}
+
+export interface ResearchJobProgress extends ResearchJobCounterProgress {
+  agent?: PublicResearchAgentProgress
+}
+
+export interface StoredResearchJobProgress extends ResearchJobCounterProgress {
+  agentState?: ResearchAgentCheckpoint
 }
 
 export interface ResearchJobDto {
@@ -46,7 +68,7 @@ export interface ResearchJobDto {
   completedAt: string | null
 }
 
-export const emptyResearchJobProgress = (): ResearchJobProgress => ({
+export const emptyResearchJobProgress = (): ResearchJobCounterProgress => ({
   validSourceCount: 0,
   readerTargetCount: 0,
   readerCompletedCount: 0,
@@ -55,3 +77,71 @@ export const emptyResearchJobProgress = (): ResearchJobProgress => ({
   insufficientCount: 0,
   readerFailedCount: 0,
 })
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeCounters(value: unknown): ResearchJobCounterProgress {
+  const empty = emptyResearchJobProgress()
+  if (!isRecord(value)) return empty
+  return Object.fromEntries(Object.keys(empty).map((key) => {
+    const name = key as keyof ResearchJobCounterProgress
+    const count = value[name]
+    return [name, Number.isSafeInteger(count) && Number(count) >= 0 ? count : 0]
+  })) as unknown as ResearchJobCounterProgress
+}
+
+function parseAgentCheckpoint(value: unknown): ResearchAgentCheckpoint | null {
+  if (!isRecord(value)) return null
+  const validPhase = [
+    'initializing', 'round_search', 'round_read', 'evaluating',
+    'replanning', 'completed', 'failed',
+  ].includes(String(value.phase))
+  const validEvaluation = [
+    'not_started', 'evaluating', 'sufficient', 'insufficient',
+  ].includes(String(value.evaluationStatus))
+  if (
+    value.version !== 1
+    || (value.currentRound !== 1 && value.currentRound !== 2)
+    || value.maxRounds !== 2
+    || (value.replanCount !== 0 && value.replanCount !== 1)
+    || value.maxReplans !== 1
+    || !validPhase
+    || !validEvaluation
+    || !Array.isArray(value.evidenceNeeds)
+    || !Array.isArray(value.followUpQueries)
+    || !Number.isSafeInteger(value.evidenceCount)
+    || Number(value.evidenceCount) < 0
+    || typeof value.updatedAt !== 'string'
+  ) return null
+  return value as unknown as ResearchAgentCheckpoint
+}
+
+export function normalizeStoredResearchJobProgress(value: unknown): StoredResearchJobProgress {
+  const counters = normalizeCounters(value)
+  const checkpoint = isRecord(value) ? parseAgentCheckpoint(value.agentState) : null
+  return { ...counters, ...(checkpoint ? { agentState: checkpoint } : {}) }
+}
+
+export function toPublicResearchJobProgress(value: unknown): ResearchJobProgress {
+  const stored = normalizeStoredResearchJobProgress(value)
+  const { agentState: checkpoint, ...counters } = stored
+  if (!checkpoint) return counters
+  return {
+    ...counters,
+    agent: {
+      currentRound: checkpoint.currentRound,
+      maxRounds: checkpoint.maxRounds,
+      replanCount: checkpoint.replanCount,
+      phase: checkpoint.phase,
+      evaluationStatus: checkpoint.evaluationStatus,
+      evidenceNeedCount: checkpoint.evidenceNeeds.length,
+      satisfiedEvidenceNeedCount: checkpoint.evidenceNeeds.filter(
+        (need) => need.status === 'satisfied',
+      ).length,
+      followUpQueryCount: checkpoint.followUpQueries.length,
+      evidenceCount: checkpoint.evidenceCount,
+    },
+  }
+}

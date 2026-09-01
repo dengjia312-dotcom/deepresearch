@@ -100,6 +100,18 @@ export function SearchResultsPage() {
   const hasCompletedLiveSearch = Boolean(state.liveResearchResult)
   const intentConfirmationPending = state.researchPlan?.intentConfirmation?.status === 'pending'
   const progress = state.researchJobProgress
+  const agent = progress?.agent
+  const agentProgressMessage = agent
+    ? agent.phase === 'evaluating'
+      ? `正在评估第 ${agent.currentRound} 轮证据完整性…`
+      : agent.phase === 'replanning'
+        ? '发现证据缺口，正在制定补充检索…'
+        : agent.currentRound === 2 && (agent.phase === 'round_search' || agent.phase === 'round_read')
+          ? `正在进行第 2 轮补充研究（${agent.followUpQueryCount} 个方向）…`
+          : agent.phase === 'completed'
+            ? '证据研究已完成，正在整理分析结果…'
+            : '正在进行第 1 轮初始研究…'
+    : null
   const currentProgressPhase = state.researchJobPhase ?? 'queued'
   const activeProgressStep = Math.max(0, liveProgressPhases.indexOf(
     currentProgressPhase === 'completed' || currentProgressPhase === 'failed'
@@ -239,6 +251,9 @@ export function SearchResultsPage() {
           <span className="section-label mt-5">Live Research in progress</span>
           <h2 className="mt-2 text-xl font-semibold text-ink">正在进行真实联网研究</h2>
           <p className="mt-2 text-sm text-ink-muted">任务已在后端执行，可以刷新页面或切换任务，返回后会继续恢复进度。</p>
+          {agentProgressMessage && (
+            <p className="mt-2 text-sm font-medium text-primary-deep">{agentProgressMessage}</p>
+          )}
           <div className="mt-7 w-full max-w-lg space-y-2.5">
             {liveProgressSteps.map((step, index) => {
               const completed = index < activeProgressStep

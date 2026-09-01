@@ -108,10 +108,31 @@ function normalizeResearchJobProgress(value: unknown): ResearchJobProgress | nul
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const candidate = value as Partial<ResearchJobProgress>
   const empty = createEmptyResearchJobProgress()
-  for (const key of Object.keys(empty) as Array<keyof ResearchJobProgress>) {
+  const counterKeys = [
+    'validSourceCount', 'readerTargetCount', 'readerCompletedCount',
+    'fullTextCount', 'partialCount', 'insufficientCount', 'readerFailedCount',
+  ] as const
+  for (const key of counterKeys) {
     if (!Number.isSafeInteger(candidate[key]) || (candidate[key] ?? -1) < 0) return null
   }
-  return { ...empty, ...candidate }
+  const agent = candidate.agent
+  const validAgent = agent
+    && (agent.currentRound === 1 || agent.currentRound === 2)
+    && agent.maxRounds === 2
+    && (agent.replanCount === 0 || agent.replanCount === 1)
+    && [
+      'initializing', 'round_search', 'round_read', 'evaluating',
+      'replanning', 'completed', 'failed',
+    ].includes(agent.phase)
+    && ['not_started', 'evaluating', 'sufficient', 'insufficient']
+      .includes(agent.evaluationStatus)
+    && [
+      agent.evidenceNeedCount,
+      agent.satisfiedEvidenceNeedCount,
+      agent.followUpQueryCount,
+      agent.evidenceCount,
+    ].every((count) => Number.isSafeInteger(count) && count >= 0)
+  return { ...empty, ...candidate, agent: validAgent ? agent : undefined }
 }
 
 function createRequestState(

@@ -6,10 +6,12 @@ import { toPersistedResearchResult } from './persistenceTransform'
 import { researchWithProviders, type ResearchExecutionHooks } from './researchService'
 import {
   completeResearchJob,
+  assertResearchJobStillCurrent,
   failResearchJob,
   incrementResearchJobReaderProgress,
   markResearchJobRunning,
   setResearchJobPhase,
+  updateResearchJobAgentCheckpoint,
 } from '../db/repositories/researchJobRepository'
 
 interface ScheduledResearchJob {
@@ -26,6 +28,8 @@ export interface ResearchJobExecutionDependencies {
   markRunning?: typeof markResearchJobRunning
   setPhase?: typeof setResearchJobPhase
   incrementReader?: typeof incrementResearchJobReaderProgress
+  assertCurrent?: typeof assertResearchJobStillCurrent
+  updateAgentCheckpoint?: typeof updateResearchJobAgentCheckpoint
   complete?: typeof completeResearchJob
   fail?: typeof failResearchJob
 }
@@ -45,10 +49,19 @@ export async function executeResearchJob(
   const markRunning = dependencies.markRunning ?? markResearchJobRunning
   const setPhase = dependencies.setPhase ?? setResearchJobPhase
   const incrementReader = dependencies.incrementReader ?? incrementResearchJobReaderProgress
+  const assertCurrent = dependencies.assertCurrent ?? assertResearchJobStillCurrent
+  const updateAgentCheckpoint = dependencies.updateAgentCheckpoint
+    ?? updateResearchJobAgentCheckpoint
   const complete = dependencies.complete ?? completeResearchJob
   const fail = dependencies.fail ?? failResearchJob
   try {
     await markRunning(job.jobId)
+    const identity = {
+      jobId: job.jobId,
+      ownerSessionId: job.ownerSessionId,
+      taskId: job.request.taskId,
+      requestId: job.request.requestId,
+    }
     failurePoint = 'research_execute'
     console.info('[research-job] phase', { jobId: job.jobId, phase: 'searching' })
     const response = await research(job.request, {
@@ -61,6 +74,14 @@ export async function executeResearchJob(
       },
       onReaderCompleted: async (status) => {
         await incrementReader(job.jobId, status)
+      },
+      assertCurrent: async () => {
+        await assertCurrent(identity)
+      },
+      onAgentCheckpoint: async (checkpoint) => {
+        if (checkpoint.phase === 'evaluating') failurePoint = 'evidence_evaluate'
+        if (checkpoint.phase === 'replanning') failurePoint = 'replan_generate'
+        await updateAgentCheckpoint(identity, checkpoint)
       },
       onSynthesisStarted: async () => {
         await setPhase(job.jobId, 'synthesizing')

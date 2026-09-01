@@ -1,12 +1,16 @@
 import type { Pool, PoolClient, QueryResultRow } from 'pg'
 import type { LiveResearchResult } from '../../../src/types'
 import type { ResearchRequest, ResearchResponse } from '../../types/research'
+import type { ResearchAgentCheckpoint } from '../../types/research'
 import {
   emptyResearchJobProgress,
+  normalizeStoredResearchJobProgress,
+  toPublicResearchJobProgress,
   type ResearchJobDto,
+  type ResearchJobCounterProgress,
   type ResearchJobFailurePoint,
   type ResearchJobPhase,
-  type ResearchJobProgress,
+  type StoredResearchJobProgress,
   type ResearchJobStatus,
 } from '../../types/researchJob'
 import { StaleTaskWriteError, TaskNotFoundError } from '../errors'
@@ -26,7 +30,7 @@ interface ResearchJobRow extends QueryResultRow {
   request_id: string
   status: ResearchJobStatus
   phase: ResearchJobPhase
-  progress: ResearchJobProgress
+  progress: StoredResearchJobProgress
   result: ResearchResponse | null
   error_code: string | null
   error_message: string | null
@@ -41,17 +45,6 @@ function toIso(value: Date | string | null) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString()
 }
 
-function normalizeProgress(value: Partial<ResearchJobProgress> | null): ResearchJobProgress {
-  const empty = emptyResearchJobProgress()
-  return Object.fromEntries(
-    Object.keys(empty).map((key) => {
-      const name = key as keyof ResearchJobProgress
-      const count = value?.[name]
-      return [name, Number.isSafeInteger(count) && (count ?? -1) >= 0 ? count : 0]
-    }),
-  ) as unknown as ResearchJobProgress
-}
-
 function toDto(row: ResearchJobRow): ResearchJobDto {
   return {
     jobId: row.id,
@@ -59,7 +52,7 @@ function toDto(row: ResearchJobRow): ResearchJobDto {
     requestId: row.request_id,
     status: row.status,
     phase: row.phase,
-    progress: normalizeProgress(row.progress),
+    progress: toPublicResearchJobProgress(row.progress),
     result: row.result,
     error: row.error_code || row.error_message
       ? {
@@ -97,7 +90,7 @@ export async function createOrReuseOwnedResearchJob(
     `, [request.taskId, ownerSessionId])
     if (!task.rows[0]) throw new TaskNotFoundError()
 
-    const researchStrategy = await assertOwnedResearchExecutionAllowedWithClient(
+    const executionContext = await assertOwnedResearchExecutionAllowedWithClient(
       client,
       ownerSessionId,
       request.taskId,
@@ -106,7 +99,6 @@ export async function createOrReuseOwnedResearchJob(
     const existing = await client.query<ResearchJobRow>(`
       SELECT * FROM research_jobs
       WHERE owner_session_id = $1 AND task_id = $2 AND request_id = $3
-        AND status IN ('queued', 'running')
       ORDER BY created_at DESC
       LIMIT 1
     `, [ownerSessionId, request.taskId, request.requestId])
@@ -131,7 +123,11 @@ export async function createOrReuseOwnedResearchJob(
     return {
       job: toDto(inserted.rows[0]!),
       created: true as const,
-      executionRequest: { ...request, researchStrategy },
+      executionRequest: {
+        ...request,
+        researchStrategy: executionContext.strategy,
+        researchPlanContext: executionContext.planContext,
+      },
     }
   }, pool)
 }
@@ -165,13 +161,13 @@ export async function markResearchJobRunning(
 export async function setResearchJobPhase(
   jobId: string,
   phase: Extract<ResearchJobPhase, 'searching' | 'reading' | 'synthesizing'>,
-  progressPatch: Partial<ResearchJobProgress> = {},
+  progressPatch: Partial<ResearchJobCounterProgress> = {},
   pool: Pool = getDatabasePool(),
 ) {
   return withTransaction(async (client) => {
     const row = await selectJobForUpdate(client, jobId)
     if (row.status !== 'running') throw new StaleTaskWriteError()
-    const progress = { ...normalizeProgress(row.progress), ...progressPatch }
+    const progress = { ...normalizeStoredResearchJobProgress(row.progress), ...progressPatch }
     const result = await client.query<ResearchJobRow>(`
       UPDATE research_jobs SET phase = $2, progress = $3, updated_at = now()
       WHERE id = $1 AND status = 'running'
@@ -189,7 +185,7 @@ export async function incrementResearchJobReaderProgress(
   return withTransaction(async (client) => {
     const row = await selectJobForUpdate(client, jobId)
     if (row.status !== 'running' || row.phase !== 'reading') throw new StaleTaskWriteError()
-    const progress = normalizeProgress(row.progress)
+    const progress = normalizeStoredResearchJobProgress(row.progress)
     progress.readerCompletedCount += 1
     if (readerStatus === 'full_text') progress.fullTextCount += 1
     else if (readerStatus === 'partial') progress.partialCount += 1
@@ -200,6 +196,69 @@ export async function incrementResearchJobReaderProgress(
       WHERE id = $1 AND status = 'running' AND phase = 'reading'
       RETURNING *
     `, [jobId, progress])
+    return toDto(result.rows[0]!)
+  }, pool)
+}
+
+export interface ResearchJobIdentity {
+  jobId: string
+  ownerSessionId: string
+  taskId: string
+  requestId: string
+}
+
+export async function assertResearchJobStillCurrent(
+  identity: ResearchJobIdentity,
+  pool: Pool = getDatabasePool(),
+) {
+  const result = await pool.query<{ id: string }>(`
+    SELECT j.id
+    FROM research_jobs j
+    JOIN research_task_stages s
+      ON s.task_id = j.task_id AND s.stage = 'research'
+    WHERE j.id = $1
+      AND j.owner_session_id = $2
+      AND j.task_id = $3
+      AND j.request_id = $4
+      AND j.status = 'running'
+      AND s.status = 'loading'
+      AND s.request_id = j.request_id
+  `, [identity.jobId, identity.ownerSessionId, identity.taskId, identity.requestId])
+  if (!result.rows[0]) throw new StaleTaskWriteError()
+}
+
+export async function updateResearchJobAgentCheckpoint(
+  identity: ResearchJobIdentity,
+  checkpoint: ResearchAgentCheckpoint,
+  pool: Pool = getDatabasePool(),
+) {
+  return withTransaction(async (client) => {
+    const row = await selectJobForUpdate(client, identity.jobId)
+    if (
+      row.owner_session_id !== identity.ownerSessionId
+      || row.task_id !== identity.taskId
+      || row.request_id !== identity.requestId
+      || row.status !== 'running'
+    ) throw new StaleTaskWriteError()
+    const stage = await client.query<{ request_id: string; status: string }>(`
+      SELECT request_id, status
+      FROM research_task_stages
+      WHERE task_id = $1 AND stage = 'research'
+      FOR UPDATE
+    `, [identity.taskId])
+    if (
+      stage.rows[0]?.status !== 'loading'
+      || stage.rows[0]?.request_id !== identity.requestId
+    ) throw new StaleTaskWriteError()
+    const progress = {
+      ...normalizeStoredResearchJobProgress(row.progress),
+      agentState: checkpoint,
+    }
+    const result = await client.query<ResearchJobRow>(`
+      UPDATE research_jobs SET progress = $2, updated_at = now()
+      WHERE id = $1 AND status = 'running'
+      RETURNING *
+    `, [identity.jobId, progress])
     return toDto(result.rows[0]!)
   }, pool)
 }

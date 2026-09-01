@@ -30,10 +30,10 @@ import type {
 import { toAsyncRequestState } from '../types'
 import type {
   ResearchJobPhase,
-  ResearchJobProgress,
   ResearchJobStatus,
 } from '../../types/researchJob'
-import type { ResearchStrategy } from '../../types/research'
+import { toPublicResearchJobProgress } from '../../types/researchJob'
+import type { ResearchPlanContext, ResearchStrategy } from '../../types/research'
 import {
   createLegacyFallbackResearchStrategy,
   invalidateResearchStrategyForPlanEdit,
@@ -129,7 +129,7 @@ interface ResearchJobProjectionRow extends QueryResultRow {
   id: string
   status: ResearchJobStatus
   phase: ResearchJobPhase
-  progress: ResearchJobProgress
+  progress: unknown
 }
 
 function toIso(value: Date | string | null | undefined) {
@@ -369,7 +369,9 @@ async function getOwnedTaskDetailFromDatabase(
     researchJobId: researchJobResult.rows[0]?.id ?? null,
     researchJobStatus: researchJobResult.rows[0]?.status ?? null,
     researchJobPhase: researchJobResult.rows[0]?.phase ?? null,
-    researchJobProgress: researchJobResult.rows[0]?.progress ?? null,
+    researchJobProgress: researchJobResult.rows[0]
+      ? toPublicResearchJobProgress(researchJobResult.rows[0].progress)
+      : null,
   }
   return {
     state,
@@ -486,7 +488,16 @@ export async function assertOwnedResearchExecutionAllowedWithClient(
     plan: plan?.payload ?? null,
     confirmedAt: plan?.confirmed_at ?? null,
   })
-  return strategy
+  const planContext: ResearchPlanContext = {
+    objective: plan!.payload.objective,
+    scope: plan!.payload.scope,
+    questions: plan!.payload.questions.map((question) => ({
+      id: question.id,
+      text: question.text,
+    })),
+    sourcePreferences: [...plan!.payload.sourcePreferences],
+  }
+  return { strategy, planContext }
 }
 
 export async function startOwnedResearchStageWithGateClient(
@@ -496,7 +507,7 @@ export async function startOwnedResearchStageWithGateClient(
   requestId: string,
   startedAt: string,
 ) {
-  const strategy = await assertOwnedResearchExecutionAllowedWithClient(
+  const executionContext = await assertOwnedResearchExecutionAllowedWithClient(
     client,
     ownerSessionId,
     taskId,
@@ -509,7 +520,7 @@ export async function startOwnedResearchStageWithGateClient(
     requestId,
     startedAt,
   )
-  return strategy
+  return executionContext
 }
 
 export async function startOwnedResearchStageWithGate(

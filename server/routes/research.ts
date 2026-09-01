@@ -88,14 +88,18 @@ researchRouter.post(
     const ownerSessionId = getOwnerSessionId(response)
     let stageStarted = false
     try {
-      const researchStrategy = await startOwnedResearchStageWithGate(
+      const executionContext = await startOwnedResearchStageWithGate(
         ownerSessionId,
         researchRequest.taskId,
         researchRequest.requestId,
         new Date().toISOString(),
       )
       stageStarted = true
-      const executionRequest = { ...researchRequest, researchStrategy }
+      const executionRequest = {
+        ...researchRequest,
+        researchStrategy: executionContext.strategy,
+        researchPlanContext: executionContext.planContext,
+      }
       const generated = await researchWithProviders(executionRequest)
       const persisted = toPersistedResearchResult(generated, researchRequest.topic)
       await completeOwnedResearch(

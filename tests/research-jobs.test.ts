@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   pollResearchJob,
@@ -263,6 +264,13 @@ test('Research Job scheduler 限制真正后台执行的生命周期并发', asy
   release()
   await new Promise((resolve) => setTimeout(resolve, 10))
   assert.equal(scheduler.getSnapshot().activeCount, 0)
+})
+
+test('Research Job 仅在 repository 返回 created=true 时 schedule Agent Loop', () => {
+  const routeSource = readFileSync('server/routes/researchJobs.ts', 'utf8')
+  const scheduleCalls = routeSource.match(/scheduleResearchJob\s*\(/g) ?? []
+  assert.equal(scheduleCalls.length, 1)
+  assert.match(routeSource, /if \(created\.created\) \{[\s\S]*?scheduleResearchJob\s*\(/)
 })
 
 test('polling 在 completed 后停止并返回最终结果', async () => {

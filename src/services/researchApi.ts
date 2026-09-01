@@ -175,6 +175,17 @@ export interface ResearchJobProgress {
   partialCount: number
   insufficientCount: number
   readerFailedCount: number
+  agent?: {
+    currentRound: 1 | 2
+    maxRounds: 2
+    replanCount: 0 | 1
+    phase: 'initializing' | 'round_search' | 'round_read' | 'evaluating' | 'replanning' | 'completed' | 'failed'
+    evaluationStatus: 'not_started' | 'evaluating' | 'sufficient' | 'insufficient'
+    evidenceNeedCount: number
+    satisfiedEvidenceNeedCount: number
+    followUpQueryCount: number
+    evidenceCount: number
+  }
 }
 
 export interface ResearchJobResponse {

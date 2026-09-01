@@ -19,6 +19,7 @@ const generationPolicyByTask: Record<GenerationTask, GenerationTaskPolicy> = {
   synthesis: { modelClass: 'strong', reasoningEffort: 'none' },
   report: { modelClass: 'strong', reasoningEffort: 'medium' },
   relevance: { modelClass: 'fast', reasoningEffort: 'none' },
+  evidence_evaluation: { modelClass: 'fast', reasoningEffort: 'none' },
 }
 
 interface GenerateContentOptions {

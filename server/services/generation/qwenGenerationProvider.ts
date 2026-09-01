@@ -13,7 +13,13 @@ const DEFAULT_STRONG_TIMEOUT_MS = 120_000
 
 export type GenerationModelClass = 'fast' | 'strong'
 export type GenerationReasoningEffort = 'none' | 'medium' | 'high'
-export type GenerationTask = 'plan' | 'outline' | 'synthesis' | 'report' | 'relevance'
+export type GenerationTask =
+  | 'plan'
+  | 'outline'
+  | 'synthesis'
+  | 'report'
+  | 'relevance'
+  | 'evidence_evaluation'
 
 export interface GenerationMessage {
   role: 'system' | 'user' | 'assistant'

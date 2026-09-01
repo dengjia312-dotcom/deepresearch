@@ -7,6 +7,15 @@ export interface ResearchRequest {
   targetSourceCount: number
   /** Server-owned metadata. Public routes ignore any client-provided value. */
   researchStrategy?: ResearchStrategy
+  /** Server-owned Plan snapshot. Public routes ignore any client-provided value. */
+  researchPlanContext?: ResearchPlanContext
+}
+
+export interface ResearchPlanContext {
+  objective: string
+  scope: string
+  questions: Array<{ id: string; text: string }>
+  sourcePreferences: string[]
 }
 
 export interface ResearchIntent {
@@ -210,6 +219,84 @@ export interface ResearchSynthesisEvidence extends VerifiedSearchMetadata {
   sourceId: string
   evidenceType: ResearchEvidenceType
   content: string
+}
+
+export type ResearchAgentPhase =
+  | 'initializing'
+  | 'round_search'
+  | 'round_read'
+  | 'evaluating'
+  | 'replanning'
+  | 'completed'
+  | 'failed'
+
+export type ResearchAgentEvaluationStatus =
+  | 'not_started'
+  | 'evaluating'
+  | 'sufficient'
+  | 'insufficient'
+
+export type ResearchAgentSourceType =
+  | 'official'
+  | 'academic'
+  | 'professional'
+  | 'news'
+  | 'company'
+  | 'recruitment'
+  | 'community'
+  | 'general_web'
+
+export type ResearchAgentAcquisitionTool = 'web_search' | 'read_webpage'
+
+export interface ResearchEvidenceNeed {
+  id: string
+  label: string
+  description: string
+  relatedQuestionIds: string[]
+  status: 'open' | 'satisfied' | 'unresolved'
+  supportingEvidenceIds: string[]
+}
+
+export interface ResearchFollowUpQuery extends SearchQuery {
+  round: 2
+  evidenceNeedIds: string[]
+}
+
+export interface ResearchEvidenceBinding {
+  evidenceNeedId?: string
+  queryId: string
+  agentRound: 1 | 2
+  acquisitionTool: ResearchAgentAcquisitionTool
+}
+
+export interface ResearchAgentEvidenceRecord {
+  evidenceId: string
+  normalizedUrl: string
+  metadata: VerifiedSearchMetadata
+  evidenceType: ResearchEvidenceType
+  content: string
+  sourceType: ResearchAgentSourceType
+  bindings: ResearchEvidenceBinding[]
+}
+
+export interface ResearchEvidenceEvaluation {
+  status: 'sufficient' | 'insufficient'
+  evidenceNeeds: ResearchEvidenceNeed[]
+  followUpQueries: ResearchFollowUpQuery[]
+}
+
+export interface ResearchAgentCheckpoint {
+  version: 1
+  currentRound: 1 | 2
+  maxRounds: 2
+  replanCount: 0 | 1
+  maxReplans: 1
+  phase: ResearchAgentPhase
+  evaluationStatus: ResearchAgentEvaluationStatus
+  evidenceNeeds: ResearchEvidenceNeed[]
+  followUpQueries: ResearchFollowUpQuery[]
+  evidenceCount: number
+  updatedAt: string
 }
 
 export type EvidenceStatus = 'sufficient' | 'limited' | 'insufficient'
