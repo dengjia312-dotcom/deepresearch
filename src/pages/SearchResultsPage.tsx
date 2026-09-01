@@ -98,6 +98,7 @@ export function SearchResultsPage() {
     && (state.searchMode === 'real' || state.searchMode === 'mock')
   ) || hasPreservedLiveResult
   const hasCompletedLiveSearch = Boolean(state.liveResearchResult)
+  const intentConfirmationPending = state.researchPlan?.intentConfirmation?.status === 'pending'
   const progress = state.researchJobProgress
   const currentProgressPhase = state.researchJobPhase ?? 'queued'
   const activeProgressStep = Math.max(0, liveProgressPhases.indexOf(
@@ -128,7 +129,7 @@ export function SearchResultsPage() {
   }
 
   const handleLiveSearch = async () => {
-    if (state.searchStatus === 'loading') return
+    if (state.searchStatus === 'loading' || intentConfirmationPending) return
     if (
       hasCompletedLiveSearch
       && !window.confirm('重新联网搜索将覆盖当前搜索结果，但不会删除已经加入资料池的来源。是否继续？')
@@ -180,7 +181,7 @@ export function SearchResultsPage() {
           <button
             type="button"
             onClick={handleLiveSearch}
-            disabled={state.searchStatus === 'loading'}
+            disabled={state.searchStatus === 'loading' || intentConfirmationPending}
             className="btn-primary h-10 px-4"
           >
             {state.searchStatus === 'loading' ? (
@@ -190,6 +191,9 @@ export function SearchResultsPage() {
             )}
             {hasCompletedLiveSearch ? '重新联网搜索' : '开始联网研究'}
           </button>
+          {intentConfirmationPending && (
+            <p className="text-xs font-medium text-amber-700">请先确认研究方向。</p>
+          )}
           <button
             type="button"
             onClick={() => navigate(getTaskRoute(state.task.id, 'pool'))}
@@ -222,7 +226,7 @@ export function SearchResultsPage() {
             <Clock3 size={14} />
             联网研究通常需要 10～45 秒
           </p>
-          <button type="button" onClick={handleLiveSearch} className="btn-primary mt-6">
+          <button type="button" onClick={handleLiveSearch} disabled={intentConfirmationPending} className="btn-primary mt-6 disabled:opacity-60">
             <Wifi size={16} />
             开始联网研究
           </button>
@@ -288,7 +292,7 @@ export function SearchResultsPage() {
             {state.searchError ?? '联网研究失败，请稍后重试。'}
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-2">
-            <button type="button" onClick={handleLiveSearch} className="btn-primary">
+            <button type="button" onClick={handleLiveSearch} disabled={intentConfirmationPending} className="btn-primary disabled:opacity-60">
               <RefreshCw size={15} />
               重新搜索
             </button>

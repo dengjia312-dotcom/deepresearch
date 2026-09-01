@@ -1,6 +1,7 @@
 import type {
   ReportDepth,
   ResearchPlan,
+  PublicIntentConfirmation,
   ResearchDepth,
   ResearchTask,
   SearchDepth,
@@ -110,6 +111,7 @@ export interface LivePlanResponse {
     estimatedSourceCount: number
     estimatedDurationMinutes: number
   }
+  intentConfirmation?: PublicIntentConfirmation
   generatedAt: string
 }
 
@@ -511,6 +513,24 @@ export async function requestSavePlan(
     headers: createApiHeaders(),
     body: JSON.stringify({ plan, invalidateDownstream, searchDepth, targetSourceCount }),
   })
+  if (!response.ok) await parseError(response)
+  return response.json() as Promise<TaskDetailResponse>
+}
+
+export async function requestConfirmResearchIntent(
+  taskId: string,
+  input: { candidateId: string } | { customDirection: string },
+  signal?: AbortSignal,
+) {
+  const response = await fetch(
+    `/api/tasks/${encodeURIComponent(taskId)}/research-intent/confirm`,
+    {
+      method: 'POST',
+      headers: createApiHeaders(),
+      body: JSON.stringify(input),
+      signal,
+    },
+  )
   if (!response.ok) await parseError(response)
   return response.json() as Promise<TaskDetailResponse>
 }

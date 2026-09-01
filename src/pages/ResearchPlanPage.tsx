@@ -15,6 +15,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { useState } from 'react'
 import { PrototypeDataNotice } from '../components/PrototypeDataNotice'
 import { getTaskRoute, useResearch } from '../context/ResearchContext'
 import { sourcePreferenceOptions } from '../data/researchPlans'
@@ -42,13 +43,17 @@ export function ResearchPlanPage() {
     removePlanQuestion,
     toggleSourcePreference,
     setSearchConfig,
+    confirmResearchIntent,
     confirmResearchPlan,
     retryResearchPlan,
     useMockPlan,
     setNotice,
   } = useResearch()
   const plan = state.researchPlan
-  const isResearching = false
+  const [isResearching, setIsResearching] = useState(false)
+  const [confirmingIntent, setConfirmingIntent] = useState(false)
+  const [showCustomDirection, setShowCustomDirection] = useState(false)
+  const [customDirection, setCustomDirection] = useState('')
 
   if (!plan) {
     return (
@@ -102,8 +107,24 @@ export function ResearchPlanPage() {
     plan.scope.trim()
       && plan.questions.length > 0
       && !hasIncompleteQuestion
-      && plan.sourcePreferences.length > 0,
+      && plan.sourcePreferences.length > 0
+      && plan.intentConfirmation?.status !== 'pending',
   )
+
+  const intentConfirmation = plan.intentConfirmation
+
+  const submitIntentConfirmation = async (
+    input: { candidateId: string } | { customDirection: string },
+  ) => {
+    if (confirmingIntent) return
+    setConfirmingIntent(true)
+    const confirmed = await confirmResearchIntent(input)
+    setConfirmingIntent(false)
+    if (confirmed) {
+      setShowCustomDirection(false)
+      setCustomDirection('')
+    }
+  }
 
   const handleStartResearch = async () => {
     if (!plan.scope.trim()) {
@@ -118,9 +139,10 @@ export function ResearchPlanPage() {
       setNotice('请至少选择一种来源偏好。')
       return
     }
-    if (!await confirmResearchPlan()) return
-
-    navigate(getTaskRoute(state.task.id, 'search'))
+    setIsResearching(true)
+    const confirmed = await confirmResearchPlan()
+    setIsResearching(false)
+    if (confirmed) navigate(getTaskRoute(state.task.id, 'search'))
   }
 
   return (
@@ -165,6 +187,103 @@ export function ResearchPlanPage() {
             <RefreshCw size={15} />
             重新生成
           </button>
+        </section>
+      )}
+
+      {intentConfirmation && intentConfirmation.status !== 'not_required' && (
+        <section className="surface-card mb-5 overflow-hidden border-blue-200">
+          <div className="border-b border-blue-100 bg-primary-soft px-5 py-4 sm:px-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-primary-deep">
+                  {intentConfirmation.status === 'confirmed'
+                    ? <CheckCircle2 size={18} />
+                    : <Sparkles size={18} />}
+                  <h2 className="text-base font-semibold">
+                    {intentConfirmation.status === 'confirmed'
+                      ? '已确认研究方向'
+                      : '确认研究方向'}
+                  </h2>
+                </div>
+                {intentConfirmation.status === 'confirmed' ? (
+                  <p className="mt-2 text-sm font-semibold text-ink">
+                    {intentConfirmation.confirmed?.label}
+                  </p>
+                ) : (
+                  <p className="mt-2 text-sm leading-6 text-ink-muted">
+                    这个主题可能存在多种理解。为了避免研究偏离，请选择你真正想研究的方向。
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {intentConfirmation.status === 'pending' && (
+            <div className="space-y-4 p-5 sm:p-6">
+              <div className="grid gap-3 lg:grid-cols-2">
+                {(intentConfirmation.candidates ?? []).map((candidate) => (
+                  <article key={candidate.id} className="rounded-xl border border-outline bg-white p-4">
+                    <h3 className="text-sm font-semibold text-ink">{candidate.label}</h3>
+                    <p className="mt-2 text-sm leading-6 text-ink-muted">{candidate.description}</p>
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {candidate.scope.slice(0, 5).map((scope) => (
+                        <span key={scope} className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-ink-muted">
+                          {scope}
+                        </span>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      disabled={confirmingIntent}
+                      onClick={() => void submitIntentConfirmation({ candidateId: candidate.id })}
+                      className="btn-primary mt-4 h-9 w-full disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {confirmingIntent ? <LoaderCircle size={14} className="animate-spin" /> : <Check size={14} />}
+                      选择这个方向
+                    </button>
+                  </article>
+                ))}
+              </div>
+
+              <div className="rounded-lg border border-dashed border-outline p-4">
+                <button
+                  type="button"
+                  onClick={() => setShowCustomDirection((visible) => !visible)}
+                  disabled={confirmingIntent}
+                  className="text-sm font-semibold text-primary-deep hover:underline"
+                >
+                  都不是？自定义研究方向
+                </button>
+                {showCustomDirection && (
+                  <div className="mt-3">
+                    <textarea
+                      value={customDirection}
+                      onChange={(event) => setCustomDirection(event.target.value)}
+                      disabled={confirmingIntent}
+                      rows={4}
+                      maxLength={1000}
+                      placeholder="说明你真正希望研究的对象、范围和重点。"
+                      className="focus-ring w-full resize-y rounded-lg border border-outline px-3.5 py-3 text-sm leading-6 text-ink outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={confirmingIntent || customDirection.trim().length < 4}
+                      onClick={() => void submitIntentConfirmation({ customDirection: customDirection.trim() })}
+                      className="btn-primary mt-3 h-9 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {confirmingIntent && <LoaderCircle size={14} className="animate-spin" />}
+                      确认研究方向
+                    </button>
+                  </div>
+                )}
+              </div>
+              {confirmingIntent && (
+                <p className="text-sm font-medium text-primary-deep" aria-live="polite">
+                  正在根据你的选择制定检索策略…
+                </p>
+              )}
+            </div>
+          )}
         </section>
       )}
 
@@ -445,13 +564,17 @@ export function ResearchPlanPage() {
               <button
                 type="button"
                 onClick={handleStartResearch}
-                disabled={isResearching || !canStart}
+                disabled={isResearching || confirmingIntent || !canStart}
                 className="btn-primary h-11 w-full"
               >
                 {isResearching ? '正在开始研究' : '确认并开始研究'}
                 <ArrowRight size={15} />
               </button>
-              {!canStart && (
+              {plan.intentConfirmation?.status === 'pending' ? (
+                <p className="text-center text-[11px] leading-4 text-amber-700">
+                  请先确认研究方向。
+                </p>
+              ) : !canStart && (
                 <p className="text-center text-[11px] leading-4 text-ink-subtle">
                   请完善研究范围、核心问题并至少选择一种来源。
                 </p>

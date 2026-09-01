@@ -4,10 +4,10 @@ import {
   createOrReuseOwnedResearchJob,
   getOwnedResearchJob,
 } from '../db/repositories/researchJobRepository'
-import { getOwnedResearchStrategy } from '../db/repositories/taskRepository'
 import { TaskNotFoundError } from '../db/errors'
 import { getOwnerSessionId } from '../middleware/sessionOwner'
 import { scheduleResearchJob } from '../services/researchJobService'
+import { ResearchServiceError } from '../services/serviceError'
 import type { ResearchErrorResponse } from '../types/research'
 import type { ResearchJobDto } from '../types/researchJob'
 import { isLikelyDatabaseError, sendPersistenceError } from './persistenceErrors'
@@ -31,14 +31,10 @@ researchJobsRouter.post(
     }
     try {
       const ownerSessionId = getOwnerSessionId(response)
-      const researchStrategy = await getOwnedResearchStrategy(ownerSessionId, input.taskId)
-      const executionInput = researchStrategy
-        ? { ...input, researchStrategy }
-        : input
       const created = await createOrReuseOwnedResearchJob(
         ownerSessionId,
         randomUUID(),
-        executionInput,
+        input,
       )
       if (created.created) {
         console.info('[research-job] created', {
@@ -49,7 +45,7 @@ researchJobsRouter.post(
         scheduleResearchJob({
           jobId: created.job.jobId,
           ownerSessionId,
-          request: executionInput,
+          request: created.executionRequest,
         })
       }
       response.status(202).json({
@@ -57,6 +53,12 @@ researchJobsRouter.post(
         status: created.job.status,
       })
     } catch (error) {
+      if (error instanceof ResearchServiceError) {
+        response.status(error.statusCode).json({
+          error: { code: error.code, message: error.publicMessage },
+        })
+        return
+      }
       if (sendPersistenceError(error, response as Response<ResearchErrorResponse>)) return
       if (isLikelyDatabaseError(error)) {
         response.status(503).json({

@@ -34,18 +34,56 @@ import type {
   ResearchJobStatus,
 } from '../../types/researchJob'
 import type { ResearchStrategy } from '../../types/research'
-import { parseResearchStrategy } from '../../services/researchStrategyService'
+import {
+  createLegacyFallbackResearchStrategy,
+  invalidateResearchStrategyForPlanEdit,
+  parseResearchStrategy,
+  toPublicIntentConfirmation,
+} from '../../services/researchStrategyService'
+import { assertResearchExecutionAllowed } from '../../services/researchExecutionGate'
+import type { PersistedResearchPlan } from '../../services/persistenceTransform'
+import { ResearchServiceError } from '../../services/serviceError'
 
 type Queryable = Pool | PoolClient
 
 interface StoredResearchPlan extends ResearchPlan {
   _researchStrategy?: ResearchStrategy
+  _researchStrategyVersion?: 2
 }
 
 function toPublicResearchPlan(plan: StoredResearchPlan | undefined): ResearchPlan | null {
   if (!plan) return null
-  const { _researchStrategy: _internalStrategy, ...publicPlan } = plan
-  return publicPlan
+  const {
+    _researchStrategy: internalStrategy,
+    _researchStrategyVersion: _internalVersion,
+    intentConfirmation: _clientProjection,
+    ...publicPlan
+  } = plan
+  const strategy = parseResearchStrategy(internalStrategy)
+  return {
+    ...publicPlan,
+    ...(strategy ? { intentConfirmation: toPublicIntentConfirmation(strategy) } : {}),
+  }
+}
+
+function sameTextList(left: string[], right: string[], orderMatters = true) {
+  const normalizedLeft = orderMatters ? left : [...left].sort()
+  const normalizedRight = orderMatters ? right : [...right].sort()
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index])
+}
+
+export function researchPlanSemanticFieldsChanged(
+  current: ResearchPlan,
+  next: ResearchPlan,
+) {
+  return current.objective !== next.objective
+    || current.scope !== next.scope
+    || !sameTextList(
+      current.questions.map((question) => question.text),
+      next.questions.map((question) => question.text),
+    )
+    || !sameTextList(current.sourcePreferences, next.sourcePreferences, false)
 }
 
 interface TaskRow extends QueryResultRow {
@@ -201,6 +239,39 @@ export async function getOwnedResearchStrategy(
     [taskId],
   )
   return parseResearchStrategy(result.rows[0]?.payload?._researchStrategy)
+}
+
+export async function getOwnedResearchPlanStrategySnapshot(
+  ownerSessionId: string,
+  taskId: string,
+  pool: Pool = getDatabasePool(),
+) {
+  const task = await selectOwnedTask(pool, ownerSessionId, taskId)
+  const result = await pool.query<{
+    payload: StoredResearchPlan
+    confirmed_at: Date | string | null
+  }>('SELECT payload, confirmed_at FROM research_plans WHERE task_id = $1', [taskId])
+  const researchStartedResult = await pool.query<{ started: boolean }>(`
+    SELECT (
+      EXISTS(SELECT 1 FROM research_results WHERE task_id = $1)
+      OR EXISTS(
+        SELECT 1 FROM research_jobs
+        WHERE task_id = $1 AND owner_session_id = $2
+          AND status IN ('queued', 'running', 'completed')
+      )
+    ) AS started
+  `, [taskId, ownerSessionId])
+  const row = result.rows[0]
+  return {
+    task: toResearchTask(task),
+    revision: task.revision,
+    plan: row?.payload ?? null,
+    publicPlan: toPublicResearchPlan(row?.payload),
+    strategy: parseResearchStrategy(row?.payload?._researchStrategy),
+    strategyVersion: row?.payload?._researchStrategyVersion ?? null,
+    confirmedAt: toIso(row?.confirmed_at),
+    researchStarted: researchStartedResult.rows[0]?.started ?? false,
+  }
 }
 
 async function getOwnedTaskDetailFromDatabase(
@@ -395,6 +466,71 @@ export async function startOwnedStageWithClient(
   ])
 }
 
+export async function assertOwnedResearchExecutionAllowedWithClient(
+  client: PoolClient,
+  ownerSessionId: string,
+  taskId: string,
+) {
+  const task = await selectOwnedTask(client, ownerSessionId, taskId, true)
+  const planResult = await client.query<{
+    payload: StoredResearchPlan
+    confirmed_at: Date | string | null
+  }>(`
+    SELECT payload, confirmed_at FROM research_plans
+    WHERE task_id = $1 FOR UPDATE
+  `, [taskId])
+  const plan = planResult.rows[0]
+  const strategy = assertResearchExecutionAllowed({
+    taskId,
+    topic: task.topic,
+    plan: plan?.payload ?? null,
+    confirmedAt: plan?.confirmed_at ?? null,
+  })
+  return strategy
+}
+
+export async function startOwnedResearchStageWithGateClient(
+  client: PoolClient,
+  ownerSessionId: string,
+  taskId: string,
+  requestId: string,
+  startedAt: string,
+) {
+  const strategy = await assertOwnedResearchExecutionAllowedWithClient(
+    client,
+    ownerSessionId,
+    taskId,
+  )
+  await startOwnedStageWithClient(
+    client,
+    ownerSessionId,
+    taskId,
+    'research',
+    requestId,
+    startedAt,
+  )
+  return strategy
+}
+
+export async function startOwnedResearchStageWithGate(
+  ownerSessionId: string,
+  taskId: string,
+  requestId: string,
+  startedAt: string,
+  pool: Pool = getDatabasePool(),
+) {
+  return withTransaction(
+    (client) => startOwnedResearchStageWithGateClient(
+      client,
+      ownerSessionId,
+      taskId,
+      requestId,
+      startedAt,
+    ),
+    pool,
+  )
+}
+
 export async function startOwnedStage(
   ownerSessionId: string,
   taskId: string,
@@ -504,7 +640,7 @@ export async function completeOwnedPlan(
   ownerSessionId: string,
   taskId: string,
   requestId: string,
-  plan: ResearchPlan,
+  plan: PersistedResearchPlan,
   pool: Pool = getDatabasePool(),
 ) {
   return withTransaction(async (client) => {
@@ -887,20 +1023,52 @@ export async function saveOwnedPlan(
   plan: ResearchPlan,
   invalidateDownstream: boolean,
   searchConfig?: Pick<ResearchTask, 'searchDepth' | 'targetSourceCount'>,
+  strategyOverride?: ResearchStrategy,
+  expectedRevision?: number,
   pool: Pool = getDatabasePool(),
 ) {
   return withTransaction(async (client) => {
-    await selectOwnedTask(client, ownerSessionId, taskId, true)
-    let planPayload: StoredResearchPlan = plan
-    if (!invalidateDownstream) {
-      const existing = await client.query<{ payload: StoredResearchPlan }>(
-        'SELECT payload FROM research_plans WHERE task_id = $1',
-        [taskId],
+    const task = await selectOwnedTask(client, ownerSessionId, taskId, true)
+    if (expectedRevision !== undefined && task.revision !== expectedRevision) {
+      throw new StaleTaskWriteError()
+    }
+    const existing = await client.query<{ payload: StoredResearchPlan }>(
+      'SELECT payload FROM research_plans WHERE task_id = $1 FOR UPDATE',
+      [taskId],
+    )
+    const existingPayload = existing.rows[0]?.payload
+    const existingStrategy = parseResearchStrategy(existingPayload?._researchStrategy)
+    const isManagedV2 = existingPayload?._researchStrategyVersion === 2
+    if (isManagedV2 && !existingStrategy) {
+      throw new ResearchServiceError(
+        'INVALID_RESEARCH_INTENT',
+        409,
+        '研究方向数据不完整，请重新生成研究计划。',
       )
-      const researchStrategy = parseResearchStrategy(
-        existing.rows[0]?.payload?._researchStrategy,
-      )
-      if (researchStrategy) planPayload = { ...plan, _researchStrategy: researchStrategy }
+    }
+    const { intentConfirmation: _clientProjection, ...publicPlan } = plan
+    let researchStrategy = strategyOverride ?? existingStrategy
+    const semanticStrategyChanged = Boolean(
+      existingPayload
+      && researchPlanSemanticFieldsChanged(existingPayload, plan),
+    )
+    if (semanticStrategyChanged) {
+      researchStrategy = isManagedV2
+        ? invalidateResearchStrategyForPlanEdit(existingStrategy!)
+        : createLegacyFallbackResearchStrategy({
+          topic: task.topic,
+          goal: plan.objective,
+          scope: plan.scope,
+        })
+    }
+    const managed = Boolean(
+      strategyOverride
+      || isManagedV2,
+    )
+    const planPayload: StoredResearchPlan = {
+      ...publicPlan,
+      ...(researchStrategy ? { _researchStrategy: researchStrategy } : {}),
+      ...(managed ? { _researchStrategyVersion: 2 as const } : {}),
     }
     await client.query(`
       INSERT INTO research_plans(task_id, payload, data_source, confirmed_at, created_at, updated_at)
@@ -929,6 +1097,77 @@ export async function saveOwnedPlan(
       taskId, plan.confirmedAt ? 'searching' : 'draft', invalidateDownstream ? 1 : 0,
       searchConfig?.searchDepth ?? null, searchConfig?.targetSourceCount ?? null,
     ])
+    return getOwnedTaskDetailFromDatabase(client, ownerSessionId, taskId)
+  }, pool)
+}
+
+export async function confirmOwnedResearchIntent(
+  ownerSessionId: string,
+  taskId: string,
+  expectedRevision: number,
+  strategy: ResearchStrategy,
+  pool: Pool = getDatabasePool(),
+) {
+  return withTransaction(async (client) => {
+    const task = await selectOwnedTask(client, ownerSessionId, taskId, true)
+    if (task.revision !== expectedRevision) throw new StaleTaskWriteError()
+    const planResult = await client.query<{ payload: StoredResearchPlan }>(`
+      SELECT payload FROM research_plans WHERE task_id = $1 FOR UPDATE
+    `, [taskId])
+    const currentPlan = planResult.rows[0]?.payload
+    const currentStrategy = parseResearchStrategy(currentPlan?._researchStrategy)
+    if (
+      !currentPlan
+      || currentPlan._researchStrategyVersion !== 2
+      || !currentStrategy
+    ) throw new StaleTaskWriteError()
+    if (currentStrategy.intentConfirmation.status !== 'pending') {
+      throw new ResearchServiceError(
+        'INVALID_RESEARCH_INTENT',
+        409,
+        '当前研究方向状态不允许再次确认。',
+      )
+    }
+    const nextStrategy = parseResearchStrategy(strategy)
+    if (
+      !nextStrategy
+      || nextStrategy.version !== 2
+      || nextStrategy.intentConfirmation.status !== 'confirmed'
+      || nextStrategy.queryPlanStatus !== 'ready'
+    ) {
+      throw new ResearchServiceError(
+        'INVALID_RESEARCH_INTENT',
+        409,
+        '确认后的研究方向或检索策略无效。',
+      )
+    }
+
+    const researchStarted = await client.query<{ started: boolean }>(`
+      SELECT (
+        EXISTS(SELECT 1 FROM research_results WHERE task_id = $1)
+        OR EXISTS(
+          SELECT 1 FROM research_jobs
+          WHERE task_id = $1 AND owner_session_id = $2
+            AND status IN ('queued', 'running', 'completed')
+        )
+      ) AS started
+    `, [taskId, ownerSessionId])
+    if (researchStarted.rows[0]?.started) throw new StaleTaskWriteError()
+
+    const { intentConfirmation: _clientProjection, ...publicPlan } = currentPlan
+    const nextPayload: StoredResearchPlan = {
+      ...publicPlan,
+      _researchStrategy: nextStrategy,
+      _researchStrategyVersion: 2,
+    }
+    await client.query(`
+      UPDATE research_plans SET payload = $2, updated_at = now()
+      WHERE task_id = $1
+    `, [taskId, nextPayload])
+    await client.query(`
+      UPDATE research_tasks SET revision = revision + 1, updated_at = now()
+      WHERE task_id = $1
+    `, [taskId])
     return getOwnedTaskDetailFromDatabase(client, ownerSessionId, taskId)
   }, pool)
 }

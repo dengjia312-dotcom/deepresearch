@@ -7,7 +7,8 @@ import { asString, isRecord } from './serviceUtils'
 import {
   applyResearchStrategyGuardrails,
   createFallbackResearchStrategy,
-  parseResearchStrategy,
+  parsePlanResearchStrategy,
+  toPublicIntentConfirmation,
 } from './researchStrategyService'
 import type {
   PlanRequest,
@@ -60,11 +61,13 @@ export async function generatePlanBundle(
 3. questions 提供 3 至 8 个互不重复的核心研究问题；
 4. sourcePreferences 只能从以下选项选择 2 至 6 项：权威报告、官方资料、行业研究、学术论文、司法案例、企业案例、用户研究、专业媒体、内部资料；
 5. 不生成研究结论，不编造来源或数据；
-6. researchIntent 必须结合上下文消除主题歧义，明确研究对象、范围和需要排除的其他含义；非歧义主题的 ambiguityDetected 必须为 false，excludedMeanings 保持为空或很短；
-7. queryPlan 生成 2 至 4 条角度不同的检索语句，不能只是同一句改写。查询先保证研究对象正确，再自然考虑来源偏好，不得机械拼接全部 sourcePreferences；
-8. 对明显垂直领域可使用少量行业关键词，但不要硬编码域名或生成站点列表；
-9. 仅输出 JSON，不要 Markdown：
-{"plan":{"objective":"研究目标","scope":"研究范围","questions":["问题1","问题2","问题3"],"sourcePreferences":["官方资料","行业研究"]},"researchIntent":{"normalizedTopic":"规范主题","researchObject":"研究对象","userIntent":"用户意图","scope":["范围"],"excludedMeanings":["排除含义"],"keyConcepts":["关键概念"],"ambiguityDetected":false},"queryPlan":{"queries":[{"query":"检索语句","purpose":"研究角度","priority":1}]}}`
+6. researchIntent 必须判断主题是否存在多个明显不同的研究对象或语义方向；只有真实语义歧义才把 ambiguityDetected 设为 true；
+7. 若 ambiguityDetected=true，intentCandidates 必须给出 2 至 4 个研究对象明显不同的方向，不得用“市场趋势/产业趋势”这类同义改写凑数；此时 queryPlan.queries 必须为空；
+8. 若 ambiguityDetected=false，intentCandidates 必须为空，queryPlan 生成 2 至 4 条角度不同的检索语句，不能只是同一句改写。查询先保证研究对象正确，再自然考虑来源偏好，不得机械拼接全部 sourcePreferences；
+9. 对明显垂直领域可使用少量行业关键词，但不要硬编码域名或生成站点列表；
+10. Candidate 必须包含 label、description、researchObject、scope、keyConcepts、excludedMeanings；
+11. 仅输出 JSON，不要 Markdown：
+{"plan":{"objective":"研究目标","scope":"研究范围","questions":["问题1","问题2","问题3"],"sourcePreferences":["官方资料","行业研究"]},"researchIntent":{"normalizedTopic":"规范主题","researchObject":"研究对象或待确认对象","userIntent":"用户意图","scope":["范围"],"excludedMeanings":["排除含义"],"keyConcepts":["关键概念"],"ambiguityDetected":false},"intentCandidates":[],"queryPlan":{"queries":[{"query":"检索语句","purpose":"研究角度","priority":1}]}}`
 
   const result = await generateContent('plan', {
     messages: [
@@ -130,9 +133,10 @@ export async function generatePlanBundle(
   }
   const strategySeed = { topic: request.topic, goal: objective, scope }
   const researchStrategy = applyResearchStrategyGuardrails(
-    parseResearchStrategy(parsed) ?? createFallbackResearchStrategy(strategySeed),
+    parsePlanResearchStrategy(parsed) ?? createFallbackResearchStrategy(strategySeed),
     strategySeed,
   )
+  response.intentConfirmation = toPublicIntentConfirmation(researchStrategy)
   const durationMs = Date.now() - startedAt
   console.info('[research:intent] completed', {
     ambiguityDetected: researchStrategy.intent.ambiguityDetected,
@@ -145,6 +149,12 @@ export async function generatePlanBundle(
     purposes: researchStrategy.queryPlan.queries.map((query) => query.purpose),
     durationMs,
   })
+  if (researchStrategy.intentConfirmation.status === 'pending') {
+    console.info('[research:intent] ambiguity-detected', {
+      taskId: request.taskId,
+      candidateCount: researchStrategy.intentConfirmation.candidates.length,
+    })
+  }
   return { response, researchStrategy }
 }
 

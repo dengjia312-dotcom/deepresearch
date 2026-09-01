@@ -16,6 +16,7 @@ import type {
 
 export interface PersistedResearchPlan extends ResearchPlan {
   _researchStrategy?: ResearchStrategy
+  _researchStrategyVersion?: 2
 }
 
 function normalizeHttpUrl(value: string) {
@@ -65,7 +66,10 @@ export function toPersistedPlan(
     dataSource: 'real',
     updatedAt: response.generatedAt,
     confirmedAt: null,
-    ...(researchStrategy ? { _researchStrategy: researchStrategy } : {}),
+    ...(researchStrategy ? {
+      _researchStrategy: researchStrategy,
+      _researchStrategyVersion: 2 as const,
+    } : {}),
   }
 }
 

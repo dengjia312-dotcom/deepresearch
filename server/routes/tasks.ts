@@ -3,7 +3,9 @@ import type { PersistedResearchStateDto } from '../db/types'
 import {
   addOwnedPoolItem,
   createOwnedTask,
+  confirmOwnedResearchIntent,
   deleteOwnedPoolItem,
+  getOwnedResearchPlanStrategySnapshot,
   getOwnedTaskDetail,
   importOwnedTaskState,
   listOwnedTasks,
@@ -15,6 +17,12 @@ import {
 import { getOwnerSessionId } from '../middleware/sessionOwner'
 import type { ResearchPlan, ResearchTask, Source } from '../../src/types'
 import type { ResearchErrorResponse } from '../types/research'
+import { ResearchServiceError } from '../services/serviceError'
+import {
+  confirmResearchIntent,
+  rebuildQueryPlanForPlan,
+  type ResearchIntentConfirmationSelection,
+} from '../services/researchIntentConfirmationService'
 import { isLikelyDatabaseError, sendPersistenceError } from './persistenceErrors'
 import {
   exportOwnedReport,
@@ -29,6 +37,12 @@ import {
 export const tasksRouter = Router()
 
 function sendTaskError(error: unknown, response: Response) {
+  if (error instanceof ResearchServiceError) {
+    response.status(error.statusCode).json({
+      error: { code: error.code, message: error.publicMessage },
+    })
+    return
+  }
   if (sendPersistenceError(error, response as Response<ResearchErrorResponse>)) return
   if (isLikelyDatabaseError(error)) {
     response.status(503).json({
@@ -229,14 +243,122 @@ tasksRouter.put('/:taskId/plan', async (request, response) => {
     return
   }
   try {
+    let strategyOverride
+    let expectedRevision
+    if (!body.invalidateDownstream && body.plan.confirmedAt) {
+      const snapshot = await getOwnedResearchPlanStrategySnapshot(
+        getOwnerSessionId(response),
+        request.params.taskId,
+      )
+      expectedRevision = snapshot.revision
+      if (snapshot.strategyVersion === 2) {
+        if (!snapshot.strategy) {
+          throw new ResearchServiceError(
+            'INVALID_RESEARCH_INTENT',
+            409,
+            '研究方向数据不完整，请重新生成研究计划。',
+          )
+        }
+        strategyOverride = snapshot.strategy.queryPlanStatus === 'ready'
+          ? snapshot.strategy
+          : await rebuildQueryPlanForPlan(
+              snapshot.task.title,
+              body.plan,
+              snapshot.strategy,
+            )
+      }
+    }
     response.json(await saveOwnedPlan(
       getOwnerSessionId(response), request.params.taskId, body.plan, body.invalidateDownstream,
       {
         searchDepth: body.searchDepth as ResearchTask['searchDepth'],
         targetSourceCount: body.targetSourceCount as number,
       },
+      strategyOverride,
+      expectedRevision,
     ))
   } catch (error) {
+    sendTaskError(error, response)
+  }
+})
+
+tasksRouter.post('/:taskId/research-intent/confirm', async (request, response) => {
+  const body = request.body as {
+    candidateId?: unknown
+    customDirection?: unknown
+  } | null
+  const candidateId = typeof body?.candidateId === 'string' ? body.candidateId.trim() : ''
+  const customDirection = typeof body?.customDirection === 'string'
+    ? body.customDirection.trim()
+    : ''
+  if (
+    !isTaskId(request.params.taskId)
+    || Boolean(candidateId) === Boolean(customDirection)
+    || candidateId.length > 160
+    || customDirection.length > 1000
+    || (customDirection && customDirection.length < 4)
+  ) {
+    response.status(400).json({
+      error: { code: 'INVALID_RESEARCH_INTENT', message: '请选择一个研究方向，或输入有效的自定义研究方向。' },
+    })
+    return
+  }
+
+  const selection: ResearchIntentConfirmationSelection = candidateId
+    ? { source: 'candidate', candidateId }
+    : { source: 'custom', customDirection }
+  const ownerSessionId = getOwnerSessionId(response)
+  console.info('[research:intent] confirmation-started', {
+    taskId: request.params.taskId,
+    source: selection.source,
+  })
+  try {
+    const snapshot = await getOwnedResearchPlanStrategySnapshot(
+      ownerSessionId,
+      request.params.taskId,
+    )
+    if (
+      snapshot.strategyVersion !== 2
+      || !snapshot.strategy
+      || !snapshot.publicPlan
+      || snapshot.strategy.intentConfirmation.status !== 'pending'
+    ) {
+      throw new ResearchServiceError(
+        'INVALID_RESEARCH_INTENT',
+        409,
+        '当前任务没有可确认的研究方向。',
+      )
+    }
+    if (snapshot.researchStarted) {
+      throw new ResearchServiceError(
+        'TASK_CONFLICT',
+        409,
+        '研究已经开始，当前版本不能再修改研究方向。',
+      )
+    }
+    const strategy = await confirmResearchIntent(
+      snapshot.task.title,
+      snapshot.publicPlan,
+      snapshot.strategy,
+      selection,
+    )
+    const detail = await confirmOwnedResearchIntent(
+      ownerSessionId,
+      request.params.taskId,
+      snapshot.revision,
+      strategy,
+    )
+    console.info('[research:intent] confirmed', {
+      taskId: request.params.taskId,
+      source: selection.source,
+      queryCount: strategy.queryPlan.queries.length,
+    })
+    response.json(detail)
+  } catch (error) {
+    console.warn('[research:intent] confirmation-failed', {
+      taskId: request.params.taskId,
+      errorCode: error instanceof ResearchServiceError ? error.code : 'INTERNAL_ERROR',
+    })
     sendTaskError(error, response)
   }
 })

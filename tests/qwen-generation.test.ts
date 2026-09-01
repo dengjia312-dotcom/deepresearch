@@ -175,7 +175,7 @@ test('Plan 严格 JSON 可以按原 schema 解析', async () => {
   })
 })
 
-test('Plan 单次 Flash 同时产出内部 Intent 与 QueryPlan 且公开响应不变', async () => {
+test('Plan 单次 Flash 对歧义主题产出 Draft Intent 与安全公开 Candidates', async () => {
   await withMockedQwen({
     response: completion(JSON.stringify({
       plan: {
@@ -211,10 +211,15 @@ test('Plan 单次 Flash 同时产出内部 Intent 与 QueryPlan 且公开响应�
     assert.equal(bodies.length, 1)
     assert.equal(bodies[0]?.model, 'qwen-test-fast')
     assert.equal(bodies[0]?.reasoning_effort, 'none')
-    assert.match(bundle.researchStrategy.intent.normalizedTopic, /环境设计专业/)
-    assert.equal(bundle.researchStrategy.queryPlan.queries.length, 4)
+    assert.equal(bundle.researchStrategy.intentConfirmation.status, 'pending')
+    assert.equal(bundle.researchStrategy.queryPlan.queries.length, 0)
+    assert.equal(bundle.response.intentConfirmation?.status, 'pending')
+    assert.equal(bundle.response.intentConfirmation?.candidates?.length, 2)
+    assert.ok(bundle.response.intentConfirmation?.candidates?.every((candidate) => (
+      !('keyConcepts' in candidate) && !('excludedMeanings' in candidate)
+    )))
     assert.deepEqual(Object.keys(bundle.response).sort(), [
-      'dataSource', 'generatedAt', 'mode', 'plan', 'requestId', 'taskId',
+      'dataSource', 'generatedAt', 'intentConfirmation', 'mode', 'plan', 'requestId', 'taskId',
     ])
   })
 })

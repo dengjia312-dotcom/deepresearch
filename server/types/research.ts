@@ -30,9 +30,46 @@ export interface SearchQueryPlan {
   queries: SearchQuery[]
 }
 
+export interface IntentCandidate {
+  id: string
+  label: string
+  description: string
+  researchObject: string
+  scope: string[]
+  keyConcepts: string[]
+  excludedMeanings: string[]
+}
+
+export interface ConfirmedIntent {
+  source: 'candidate' | 'custom'
+  candidateId?: string
+  label: string
+  normalizedTopic: string
+  researchObject: string
+  userIntent: string
+  scope: string[]
+  keyConcepts: string[]
+  excludedMeanings: string[]
+}
+
+export interface IntentConfirmation {
+  status: 'not_required' | 'pending' | 'confirmed'
+  candidates: IntentCandidate[]
+  confirmedIntent?: ConfirmedIntent
+}
+
 export interface ResearchStrategy {
+  version: 1 | 2
   intent: ResearchIntent
   queryPlan: SearchQueryPlan
+  intentConfirmation: IntentConfirmation
+  queryPlanStatus: 'ready' | 'stale' | 'pending_confirmation'
+}
+
+export interface PublicIntentConfirmation {
+  status: IntentConfirmation['status']
+  candidates?: Array<Pick<IntentCandidate, 'id' | 'label' | 'description' | 'scope'>>
+  confirmed?: Pick<ConfirmedIntent, 'source' | 'label'>
 }
 
 export type ResearchDepth = 'quick' | 'deep' | 'professional'
@@ -62,6 +99,7 @@ export interface PlanResponse {
     estimatedSourceCount: number
     estimatedDurationMinutes: number
   }
+  intentConfirmation?: PublicIntentConfirmation
   generatedAt: string
 }
 
@@ -126,6 +164,9 @@ export type ResearchErrorCode =
   | 'MIMO_NETWORK_ERROR'
   | 'MIMO_RESPONSE_INVALID'
   | 'RESEARCH_SEARCH_FAILED'
+  | 'RESEARCH_PLAN_CONFIRMATION_REQUIRED'
+  | 'RESEARCH_INTENT_CONFIRMATION_REQUIRED'
+  | 'INVALID_RESEARCH_INTENT'
   | 'NO_RELEVANT_SOURCES'
   | 'RESEARCH_JOB_INTERRUPTED'
   | 'NO_REAL_SOURCES'

@@ -10,12 +10,15 @@ import {
   completeOwnedPlan,
   completeOwnedReport,
   completeOwnedResearch,
+  confirmOwnedResearchIntent,
   createOwnedTask,
   failOwnedStage,
   getOwnedTaskDetail,
+  getOwnedResearchPlanStrategySnapshot,
   importOwnedTaskState,
   listOwnedTasks,
   recoverInterruptedStages,
+  saveOwnedPlan,
   startOwnedStage,
   updateOwnedPoolItem,
 } from '../server/db/repositories/taskRepository'
@@ -29,7 +32,7 @@ import {
   recoverInterruptedResearchJobs,
   setResearchJobPhase,
 } from '../server/db/repositories/researchJobRepository'
-import type { ResearchRequest, ResearchResponse } from '../server/types/research'
+import type { ResearchRequest, ResearchResponse, ResearchStrategy } from '../server/types/research'
 import type {
   LiveOutlineResult,
   LiveReportResult,
@@ -40,6 +43,8 @@ import type {
 } from '../src/types'
 import { exportOwnedReport } from '../server/reporting/reportExportService'
 import { ReportNotReadyError } from '../server/reporting/reportDocument'
+import { createFallbackResearchStrategy } from '../server/services/researchStrategyService'
+import { ResearchServiceError } from '../server/services/serviceError'
 
 const connectionString = process.env.TEST_DATABASE_URL?.trim()
 const skipReason = connectionString ? false : '需要真实 TEST_DATABASE_URL；不使用 mock 或内存数据库替代。'
@@ -172,6 +177,44 @@ function jobResponse(input: ResearchRequest): ResearchResponse {
   }
 }
 
+function confirmedStrategyForPending(strategy: ResearchStrategy): ResearchStrategy {
+  const candidate = strategy.intentConfirmation.candidates[0]!
+  const intent = {
+    normalizedTopic: candidate.label,
+    researchObject: candidate.researchObject,
+    userIntent: candidate.description,
+    scope: candidate.scope,
+    excludedMeanings: candidate.excludedMeanings,
+    keyConcepts: candidate.keyConcepts,
+    ambiguityDetected: false,
+  }
+  return {
+    version: 2,
+    intent,
+    queryPlan: { queries: [
+      { id: 'query-1', query: `${candidate.keyConcepts[0]} 发展趋势`, purpose: '发展趋势', priority: 1 },
+      { id: 'query-2', query: `${candidate.keyConcepts[1]} 就业前景`, purpose: '就业前景', priority: 2 },
+      { id: 'query-3', query: `${candidate.keyConcepts[2]} 能力要求`, purpose: '能力要求', priority: 3 },
+    ] },
+    intentConfirmation: {
+      status: 'confirmed',
+      candidates: strategy.intentConfirmation.candidates,
+      confirmedIntent: {
+        source: 'candidate',
+        candidateId: candidate.id,
+        label: candidate.label,
+        normalizedTopic: intent.normalizedTopic,
+        researchObject: intent.researchObject,
+        userIntent: intent.userIntent,
+        scope: intent.scope,
+        excludedMeanings: intent.excludedMeanings,
+        keyConcepts: intent.keyConcepts,
+      },
+    },
+    queryPlanStatus: 'ready',
+  }
+}
+
 function outlineResult(sourceId: string): LiveOutlineResult {
   return {
     mode: 'live', dataSource: 'real', warnings: [], generatedAt: new Date().toISOString(),
@@ -206,6 +249,13 @@ async function owner(raw = randomUUID()) {
 
 async function created(ownerId: string, taskId = `task-${randomUUID()}`) {
   return createOwnedTask(ownerId, { task: task(taskId) }, pool)
+}
+
+async function researchReady(ownerId: string, taskId = `task-${randomUUID()}`) {
+  await created(ownerId, taskId)
+  await startOwnedStage(ownerId, taskId, 'plan', 'plan-ready', new Date().toISOString(), {}, pool)
+  await completeOwnedPlan(ownerId, taskId, 'plan-ready', plan('ready'), pool)
+  return getOwnedTaskDetail(ownerId, taskId, pool)
 }
 
 async function completedChain(ownerId: string, taskId = `task-${randomUUID()}`) {
@@ -247,10 +297,195 @@ pgTest('2. migration 可重复执行', async () => {
   assert.equal(rows.rowCount, 2)
 })
 
+pgTest('新版 pending Intent 在 Job 事务入口被阻止且不创建 Job/不启动 stage', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const strategy = createFallbackResearchStrategy({
+    topic: '环境设计的未来',
+    goal: '分析环境设计专业未来发展方向、就业前景、行业趋势和能力要求。',
+  })
+  const managedPlan = {
+    ...plan('ambiguous'),
+    _researchStrategy: strategy,
+    _researchStrategyVersion: 2 as const,
+  }
+  await startOwnedStage(ownerId, detail.state.task.id, 'plan', 'plan-managed', new Date().toISOString(), {}, pool)
+  await completeOwnedPlan(ownerId, detail.state.task.id, 'plan-managed', managedPlan, pool)
+  await assert.rejects(
+    () => createOrReuseOwnedResearchJob(
+      ownerId,
+      randomUUID(),
+      jobRequest(detail.state.task.id),
+      pool,
+    ),
+    (error) => error instanceof ResearchServiceError
+      && error.code === 'RESEARCH_INTENT_CONFIRMATION_REQUIRED',
+  )
+  assert.equal((await pool.query('SELECT * FROM research_jobs')).rowCount, 0)
+  const restored = await getOwnedTaskDetail(ownerId, detail.state.task.id, pool)
+  assert.equal(restored.state.searchStatus, 'idle')
+  assert.equal(restored.state.requests.research.requestId, null)
+})
+
+pgTest('pending Intent 即使存在同 requestId queued Job 也不能绕过 Gate', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const strategy = createFallbackResearchStrategy({
+    topic: '环境设计的未来',
+    goal: '分析环境设计专业未来发展方向、就业前景、行业趋势和能力要求。',
+  })
+  const managedPlan = {
+    ...plan('ambiguous-existing'),
+    _researchStrategy: strategy,
+    _researchStrategyVersion: 2 as const,
+  }
+  await startOwnedStage(ownerId, detail.state.task.id, 'plan', 'plan-managed-existing', new Date().toISOString(), {}, pool)
+  await completeOwnedPlan(ownerId, detail.state.task.id, 'plan-managed-existing', managedPlan, pool)
+  const request = jobRequest(detail.state.task.id, 'existing-pending-request')
+  await pool.query(`
+    INSERT INTO research_jobs(id, task_id, owner_session_id, request_id, status, phase)
+    VALUES ($1, $2, $3, $4, 'queued', 'queued')
+  `, [randomUUID(), detail.state.task.id, ownerId, request.requestId])
+  await assert.rejects(
+    () => createOrReuseOwnedResearchJob(ownerId, randomUUID(), request, pool),
+    (error) => error instanceof ResearchServiceError
+      && error.code === 'RESEARCH_INTENT_CONFIRMATION_REQUIRED',
+  )
+  assert.equal((await pool.query('SELECT * FROM research_jobs')).rowCount, 1)
+  const restored = await getOwnedTaskDetail(ownerId, detail.state.task.id, pool)
+  assert.equal(restored.state.searchStatus, 'idle')
+  assert.equal(restored.state.requests.research.requestId, null)
+})
+
+pgTest('Intent repository transaction 只允许 pending -> confirmed', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const pending = createFallbackResearchStrategy({
+    topic: '环境设计的未来',
+    goal: '分析环境设计专业未来发展方向、就业前景、行业趋势和能力要求。',
+  })
+  await startOwnedStage(ownerId, detail.state.task.id, 'plan', 'plan-confirm-state', new Date().toISOString(), {}, pool)
+  const withPending = await completeOwnedPlan(ownerId, detail.state.task.id, 'plan-confirm-state', {
+    ...plan('confirm-state'),
+    _researchStrategy: pending,
+    _researchStrategyVersion: 2 as const,
+  }, pool)
+  const confirmed = confirmedStrategyForPending(pending)
+  const afterConfirm = await confirmOwnedResearchIntent(
+    ownerId,
+    detail.state.task.id,
+    withPending.state.revision,
+    confirmed,
+    pool,
+  )
+  await assert.rejects(
+    () => confirmOwnedResearchIntent(
+      ownerId,
+      detail.state.task.id,
+      afterConfirm.state.revision,
+      confirmed,
+      pool,
+    ),
+    (error) => error instanceof ResearchServiceError
+      && error.code === 'INVALID_RESEARCH_INTENT'
+      && error.status === 409,
+  )
+})
+
+pgTest('v2 marker 缺失 Strategy 的 Plan save 返回 INVALID_RESEARCH_INTENT', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const corruptPlan = { ...plan('corrupt'), _researchStrategyVersion: 2 as const }
+  await startOwnedStage(ownerId, detail.state.task.id, 'plan', 'plan-corrupt', new Date().toISOString(), {}, pool)
+  await completeOwnedPlan(ownerId, detail.state.task.id, 'plan-corrupt', corruptPlan, pool)
+  await assert.rejects(
+    () => saveOwnedPlan(
+      ownerId,
+      detail.state.task.id,
+      { ...plan('corrupt'), estimatedSourceCount: 20 },
+      true,
+      { searchDepth: 'deep', targetSourceCount: 20 },
+      undefined,
+      undefined,
+      pool,
+    ),
+    (error) => error instanceof ResearchServiceError
+      && error.code === 'INVALID_RESEARCH_INTENT',
+  )
+  const snapshot = await getOwnedResearchPlanStrategySnapshot(ownerId, detail.state.task.id, pool)
+  assert.equal(snapshot.strategyVersion, 2)
+  assert.equal(snapshot.strategy, null)
+})
+
+pgTest('仅修改 searchDepth/targetSourceCount 不使 managed QueryPlan stale', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const basePlan = plan('search-config')
+  const strategy = createFallbackResearchStrategy({
+    topic: detail.state.task.title,
+    goal: basePlan.objective,
+    scope: basePlan.scope,
+  })
+  await startOwnedStage(ownerId, detail.state.task.id, 'plan', 'plan-search-config', new Date().toISOString(), {}, pool)
+  await completeOwnedPlan(ownerId, detail.state.task.id, 'plan-search-config', {
+    ...basePlan,
+    _researchStrategy: strategy,
+    _researchStrategyVersion: 2 as const,
+  }, pool)
+  await saveOwnedPlan(
+    ownerId,
+    detail.state.task.id,
+    { ...basePlan, estimatedSourceCount: 24, confirmedAt: null },
+    true,
+    { searchDepth: 'deep', targetSourceCount: 24 },
+    undefined,
+    undefined,
+    pool,
+  )
+  const snapshot = await getOwnedResearchPlanStrategySnapshot(ownerId, detail.state.task.id, pool)
+  assert.equal(snapshot.strategy?.queryPlanStatus, 'ready')
+  assert.deepEqual(snapshot.strategy?.queryPlan, strategy.queryPlan)
+  assert.equal(snapshot.task.searchDepth, 'deep')
+  assert.equal(snapshot.task.targetSourceCount, 24)
+})
+
+pgTest('Plan 编辑保留受管 Intent 元数据并显式使 QueryPlan 失效', async () => {
+  const ownerId = await owner()
+  const detail = await created(ownerId)
+  const strategy = createFallbackResearchStrategy({
+    topic: '环境设计的未来',
+    goal: '分析环境设计专业就业和行业发展',
+  })
+  const originalPlan = {
+    ...plan('managed'),
+    _researchStrategy: strategy,
+    _researchStrategyVersion: 2 as const,
+  }
+  await startOwnedStage(ownerId, detail.state.task.id, 'plan', 'plan-managed', new Date().toISOString(), {}, pool)
+  await completeOwnedPlan(ownerId, detail.state.task.id, 'plan-managed', originalPlan, pool)
+  await saveOwnedPlan(
+    ownerId,
+    detail.state.task.id,
+    { ...plan('edited'), confirmedAt: null },
+    true,
+    { searchDepth: 'standard', targetSourceCount: 12 },
+    undefined,
+    undefined,
+    pool,
+  )
+  const snapshot = await getOwnedResearchPlanStrategySnapshot(ownerId, detail.state.task.id, pool)
+  assert.equal(snapshot.strategyVersion, 2)
+  assert.equal(snapshot.strategy?.intentConfirmation.status, 'pending')
+  assert.equal(snapshot.strategy?.intentConfirmation.candidates.length, 2)
+  assert.equal(snapshot.strategy?.queryPlanStatus, 'pending_confirmation')
+  assert.deepEqual(snapshot.strategy?.queryPlan.queries, [])
+  assert.equal(snapshot.publicPlan?.intentConfirmation?.status, 'pending')
+})
+
 pgTest('Research Job 同 task/request 幂等且只归所属 session 可读', async () => {
   const ownerId = await owner()
   const otherOwnerId = await owner()
-  const detail = await created(ownerId)
+  const detail = await researchReady(ownerId)
   const input = jobRequest(detail.state.task.id)
   const first = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
   const duplicate = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
@@ -265,7 +500,7 @@ pgTest('Research Job 同 task/request 幂等且只归所属 session 可读', asy
 
 pgTest('Research Job 保存真实阶段进度并与任务结果原子完成', async () => {
   const ownerId = await owner()
-  const detail = await created(ownerId)
+  const detail = await researchReady(ownerId)
   const input = jobRequest(detail.state.task.id)
   const createdJob = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
   await markResearchJobRunning(createdJob.job.jobId, pool)
@@ -296,7 +531,7 @@ pgTest('Research Job 保存真实阶段进度并与任务结果原子完成', as
 
 pgTest('旧 requestId Job 完成不能覆盖更新请求', async () => {
   const ownerId = await owner()
-  const detail = await created(ownerId)
+  const detail = await researchReady(ownerId)
   const oldRequest = jobRequest(detail.state.task.id, 'old-request')
   const oldJob = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), oldRequest, pool)
   await markResearchJobRunning(oldJob.job.jobId, pool)
@@ -319,7 +554,7 @@ pgTest('旧 requestId Job 完成不能覆盖更新请求', async () => {
 
 pgTest('服务重启把 queued/running Job 标记为可重试失败', async () => {
   const ownerId = await owner()
-  const detail = await created(ownerId)
+  const detail = await researchReady(ownerId)
   const input = jobRequest(detail.state.task.id)
   const createdJob = await createOrReuseOwnedResearchJob(ownerId, randomUUID(), input, pool)
   await markResearchJobRunning(createdJob.job.jobId, pool)

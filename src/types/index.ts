@@ -77,6 +77,23 @@ export interface ResearchPlan {
   dataSource: DataSource
   updatedAt: string
   confirmedAt: string | null
+  intentConfirmation?: PublicIntentConfirmation
+}
+
+export interface PublicIntentCandidate {
+  id: string
+  label: string
+  description: string
+  scope: string[]
+}
+
+export interface PublicIntentConfirmation {
+  status: 'not_required' | 'pending' | 'confirmed'
+  candidates?: PublicIntentCandidate[]
+  confirmed?: {
+    source: 'candidate' | 'custom'
+    label: string
+  }
 }
 
 export interface Source {

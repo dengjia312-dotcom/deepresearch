@@ -25,6 +25,7 @@ import {
   requestLiveReport,
   pollResearchJob,
   requestCreateResearchJob,
+  requestConfirmResearchIntent,
   requestAddPoolItem,
   requestCreateTask,
   requestImportV4,
@@ -56,6 +57,7 @@ import type {
   ResearchDepth,
   ResearchPlan,
   ResearchPoolItem,
+  PublicIntentConfirmation,
   ResearchQuestion,
   ResearchTask,
   ResearchTopicData,
@@ -441,7 +443,49 @@ function isResearchPlan(value: unknown): value is ResearchPlan {
     )
     && typeof candidate.updatedAt === 'string'
     && (candidate.confirmedAt === null || typeof candidate.confirmedAt === 'string')
+    && (
+      candidate.intentConfirmation === undefined
+      || normalizePublicIntentConfirmation(candidate.intentConfirmation) !== null
+    )
   )
+}
+
+function normalizePublicIntentConfirmation(value: unknown): PublicIntentConfirmation | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const candidate = value as PublicIntentConfirmation
+  if (!['not_required', 'pending', 'confirmed'].includes(candidate.status)) return null
+  const candidates = candidate.candidates
+  if (candidates !== undefined && (
+    !Array.isArray(candidates)
+    || candidates.length > 4
+    || candidates.some((item) => (
+      !item || typeof item.id !== 'string' || !item.id
+      || typeof item.label !== 'string' || !item.label
+      || typeof item.description !== 'string' || !item.description
+      || !Array.isArray(item.scope)
+      || item.scope.some((scope) => typeof scope !== 'string')
+    ))
+  )) return null
+  if (candidate.status === 'pending' && (!candidates || candidates.length < 2)) return null
+  if (candidate.confirmed !== undefined && (
+    !candidate.confirmed
+    || (candidate.confirmed.source !== 'candidate' && candidate.confirmed.source !== 'custom')
+    || typeof candidate.confirmed.label !== 'string'
+    || !candidate.confirmed.label
+  )) return null
+  if (candidate.status === 'confirmed' && !candidate.confirmed) return null
+  return {
+    status: candidate.status,
+    ...(candidates ? {
+      candidates: candidates.map((item) => ({
+        id: item.id.trim(),
+        label: item.label.trim(),
+        description: item.description.trim(),
+        scope: item.scope.map((scope) => scope.trim()).filter(Boolean).slice(0, 8),
+      })),
+    } : {}),
+    ...(candidate.confirmed ? { confirmed: { ...candidate.confirmed } } : {}),
+  }
 }
 
 function sanitizeLivePlan(
@@ -485,6 +529,10 @@ function sanitizeLivePlan(
     && !Number.isNaN(Date.parse(response.generatedAt))
     ? response.generatedAt
     : new Date().toISOString()
+  const intentConfirmation = response.intentConfirmation === undefined
+    ? undefined
+    : normalizePublicIntentConfirmation(response.intentConfirmation)
+  if (response.intentConfirmation !== undefined && !intentConfirmation) return null
 
   return {
     objective: response.plan.objective.trim(),
@@ -500,6 +548,7 @@ function sanitizeLivePlan(
     dataSource: 'real',
     updatedAt: generatedAt,
     confirmedAt: null,
+    ...(intentConfirmation ? { intentConfirmation } : {}),
   }
 }
 
@@ -848,6 +897,9 @@ function getResearchRequestFailure(error: unknown): ResearchRequestFailure {
     MIMO_RATE_LIMITED: '当前生成请求较多，请稍后重试。',
     MIMO_NETWORK_ERROR: '后端暂时无法连接 AI 生成服务，请稍后重试。',
     RESEARCH_SEARCH_FAILED: 'GLM 联网检索暂时失败，请稍后手动重试。',
+    RESEARCH_PLAN_CONFIRMATION_REQUIRED: '请先确认研究计划，再开始联网研究。',
+    RESEARCH_INTENT_CONFIRMATION_REQUIRED: '请先确认研究方向，再开始联网研究。',
+    INVALID_RESEARCH_INTENT: '研究方向或检索策略无效，请重新确认。',
     RESEARCH_JOB_INTERRUPTED: '研究任务因服务中断未完成，请重新发起研究。',
     NO_REAL_SOURCES: '本次研究没有返回可验证的真实来源，请调整主题后重试。',
     MIMO_RESPONSE_INVALID: 'AI 返回的数据结构异常，请重新生成。',
@@ -2171,6 +2223,9 @@ interface ResearchContextValue {
   toggleSourcePreference: (preference: SourcePreference) => void
   setSearchConfig: (depth: SearchDepth, targetSourceCount: number) => void
   setReportDepth: (depth: ReportDepth) => void
+  confirmResearchIntent: (
+    input: { candidateId: string } | { customDirection: string },
+  ) => Promise<boolean>
   confirmResearchPlan: () => Promise<boolean>
   startLiveResearch: () => Promise<boolean>
   useMockResearch: () => void
@@ -2907,6 +2962,22 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
     })
   }, [dispatchToTask, enqueueMutation, recoverTaskAfterMutationFailure, state.task.id])
 
+  const confirmResearchIntent = useCallback(async (
+    input: { candidateId: string } | { customDirection: string },
+  ) => {
+    try {
+      const detail = await requestConfirmResearchIntent(state.task.id, input)
+      replaceTaskFromPayload(state.task.id, detail.state)
+      setDatabaseError(null)
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '研究方向确认失败，请重试。'
+      setDatabaseError(message)
+      dispatchToTask(state.task.id, { type: 'SET_NOTICE', notice: message })
+      return false
+    }
+  }, [dispatchToTask, replaceTaskFromPayload, state.task.id])
+
   const confirmResearchPlan = useCallback(async () => {
     const plan = state.researchPlan
     if (!plan) {
@@ -2926,6 +2997,10 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
     }
     if (plan.sourcePreferences.length === 0) {
       dispatchToTask(state.task.id, { type: 'SET_NOTICE', notice: '请至少选择一种来源偏好。' })
+      return false
+    }
+    if (plan.intentConfirmation?.status === 'pending') {
+      dispatchToTask(state.task.id, { type: 'SET_NOTICE', notice: '请先确认研究方向。' })
       return false
     }
     const action: ResearchAction = { type: 'CONFIRM_PLAN', confirmedAt: new Date().toISOString() }
@@ -2953,6 +3028,10 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
     const plan = state.researchPlan
     if (!plan?.confirmedAt) {
       dispatchToTask(state.task.id, { type: 'SET_NOTICE', notice: '请先确认研究计划。' })
+      return false
+    }
+    if (plan.intentConfirmation?.status === 'pending') {
+      dispatchToTask(state.task.id, { type: 'SET_NOTICE', notice: '请先确认研究方向。' })
       return false
     }
 
@@ -3424,6 +3503,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
       toggleSourcePreference,
       setSearchConfig,
       setReportDepth,
+      confirmResearchIntent,
       confirmResearchPlan,
       startLiveResearch,
       useMockResearch,
@@ -3463,6 +3543,7 @@ export function ResearchProvider({ children }: { children: ReactNode }) {
       toggleSourcePreference,
       setSearchConfig,
       setReportDepth,
+      confirmResearchIntent,
       confirmResearchPlan,
       startLiveResearch,
       useMockResearch,

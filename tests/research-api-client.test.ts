@@ -7,6 +7,7 @@ import {
   requestLivePlan,
   requestLiveReport,
   requestLiveResearch,
+  requestConfirmResearchIntent,
   requestReportExport,
   ResearchApiError,
 } from '../src/services/researchApi'
@@ -36,6 +37,30 @@ test('匿名 sessionId 写入 localStorage 并在刷新后复用', () => {
   assert.equal(first, TEST_SESSION_ID)
   assert.equal(refreshed, TEST_SESSION_ID)
   assert.equal(storage.getItem(clientSessionTestApi.storageKey), TEST_SESSION_ID)
+})
+
+test('Intent Confirmation 使用 tasks 子资源并复用匿名 session', async () => {
+  const originalFetch = globalThis.fetch
+  let capturedUrl = ''
+  let capturedBody = ''
+  let capturedSession = ''
+  globalThis.fetch = async (input, init) => {
+    capturedUrl = String(input)
+    capturedBody = String(init?.body)
+    capturedSession = new Headers(init?.headers).get(clientSessionTestApi.headerName) ?? ''
+    return new Response(JSON.stringify({ state: {}, citations: [] }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+  try {
+    await requestConfirmResearchIntent('task-12345678', { candidateId: 'candidate-1' })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.equal(capturedUrl, '/api/tasks/task-12345678/research-intent/confirm')
+  assert.deepEqual(JSON.parse(capturedBody), { candidateId: 'candidate-1' })
+  assert.equal(clientSessionTestApi.isValidClientSessionId(capturedSession), true)
 })
 
 test('Plan、Research、Outline、Report 使用同一个 session 请求头', async () => {

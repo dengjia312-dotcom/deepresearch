@@ -13,6 +13,7 @@ import { StaleTaskWriteError, TaskNotFoundError } from '../errors'
 import { getDatabasePool } from '../pool'
 import { withTransaction } from '../transactions'
 import {
+  assertOwnedResearchExecutionAllowedWithClient,
   completeOwnedResearchWithClient,
   failOwnedStageWithClient,
   startOwnedStageWithClient,
@@ -96,6 +97,12 @@ export async function createOrReuseOwnedResearchJob(
     `, [request.taskId, ownerSessionId])
     if (!task.rows[0]) throw new TaskNotFoundError()
 
+    const researchStrategy = await assertOwnedResearchExecutionAllowedWithClient(
+      client,
+      ownerSessionId,
+      request.taskId,
+    )
+
     const existing = await client.query<ResearchJobRow>(`
       SELECT * FROM research_jobs
       WHERE owner_session_id = $1 AND task_id = $2 AND request_id = $3
@@ -103,7 +110,9 @@ export async function createOrReuseOwnedResearchJob(
       ORDER BY created_at DESC
       LIMIT 1
     `, [ownerSessionId, request.taskId, request.requestId])
-    if (existing.rows[0]) return { job: toDto(existing.rows[0]), created: false }
+    if (existing.rows[0]) {
+      return { job: toDto(existing.rows[0]), created: false as const, executionRequest: null }
+    }
 
     await startOwnedStageWithClient(
       client,
@@ -119,7 +128,11 @@ export async function createOrReuseOwnedResearchJob(
       ) VALUES ($1, $2, $3, $4, 'queued', 'queued', $5)
       RETURNING *
     `, [jobId, request.taskId, ownerSessionId, request.requestId, emptyResearchJobProgress()])
-    return { job: toDto(inserted.rows[0]!), created: true }
+    return {
+      job: toDto(inserted.rows[0]!),
+      created: true as const,
+      executionRequest: { ...request, researchStrategy },
+    }
   }, pool)
 }
 
