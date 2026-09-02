@@ -246,7 +246,9 @@ export type ResearchAgentSourceType =
   | 'community'
   | 'general_web'
 
-export type ResearchAgentAcquisitionTool = 'web_search' | 'read_webpage'
+export type ResearchToolName = 'web_search' | 'read_webpage'
+
+export type ResearchAgentAcquisitionTool = ResearchToolName
 
 export interface ResearchEvidenceNeed {
   id: string
@@ -296,6 +298,9 @@ export interface ResearchAgentCheckpoint {
   evidenceNeeds: ResearchEvidenceNeed[]
   followUpQueries: ResearchFollowUpQuery[]
   evidenceCount: number
+  currentTool?: ResearchToolName | null
+  toolCallCount?: number
+  toolCallCounts?: Partial<Record<ResearchToolName, number>>
   updatedAt: string
 }
 

@@ -102,7 +102,11 @@ export function SearchResultsPage() {
   const progress = state.researchJobProgress
   const agent = progress?.agent
   const agentProgressMessage = agent
-    ? agent.phase === 'evaluating'
+    ? agent.currentTool === 'web_search'
+      ? '正在搜索相关资料…'
+      : agent.currentTool === 'read_webpage'
+        ? '正在读取网页正文…'
+        : agent.phase === 'evaluating'
       ? `正在评估第 ${agent.currentRound} 轮证据完整性…`
       : agent.phase === 'replanning'
         ? '发现证据缺口，正在制定补充检索…'

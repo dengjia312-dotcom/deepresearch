@@ -3,7 +3,7 @@ import type {
   ResearchRequest,
   ResearchResponse,
 } from '../types/research'
-import type { GlmReaderStatus } from './glmResearchRetrievalService'
+import type { ResearchReaderStatus } from '../types/researchTool'
 import { runResearchAgent } from './researchAgentService'
 import { synthesizeResearchResponse } from './researchSynthesisService'
 import { resolveResearchStrategy } from './researchStrategyService'
@@ -12,7 +12,7 @@ export interface ResearchExecutionHooks {
   onSearchStarted?: () => Promise<void> | void
   onSearchCompleted?: (validSourceCount: number) => Promise<void> | void
   onReaderStarted?: (readerTargetCount: number) => Promise<void> | void
-  onReaderCompleted?: (status: GlmReaderStatus) => Promise<void> | void
+  onReaderCompleted?: (status: ResearchReaderStatus) => Promise<void> | void
   assertCurrent?: () => Promise<void> | void
   onAgentCheckpoint?: (checkpoint: ResearchAgentCheckpoint) => Promise<void> | void
   onSynthesisStarted?: () => Promise<void> | void

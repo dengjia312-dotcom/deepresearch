@@ -185,6 +185,8 @@ export interface ResearchJobProgress {
     satisfiedEvidenceNeedCount: number
     followUpQueryCount: number
     evidenceCount: number
+    currentTool: 'web_search' | 'read_webpage' | null
+    toolCallCount: number
   }
 }
 

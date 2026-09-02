@@ -177,6 +177,8 @@ test('Research Job loading 状态持久化后可恢复轮询且不影响其他�
         satisfiedEvidenceNeedCount: 1,
         followUpQueryCount: 2,
         evidenceCount: 11,
+        currentTool: 'read_webpage',
+        toolCallCount: 4,
       },
     },
   })
@@ -192,6 +194,8 @@ test('Research Job loading 状态持久化后可恢复轮询且不影响其他�
   assert.equal(restored.researchJobProgress?.agent?.currentRound, 2)
   assert.equal(restored.researchJobProgress?.agent?.phase, 'round_read')
   assert.equal(restored.researchJobProgress?.agent?.evidenceCount, 11)
+  assert.equal(restored.researchJobProgress?.agent?.currentTool, 'read_webpage')
+  assert.equal(restored.researchJobProgress?.agent?.toolCallCount, 4)
   assert.equal(workspace.tasksById['task-B']?.researchJobId, null)
 })
 

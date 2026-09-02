@@ -442,6 +442,7 @@ test('正式 Research 链路保持原响应 schema 且 Reader 正文不进入 so
     const result = await researchWithProviders(request)
     assert.equal(readerCount, 6)
     assert.equal(generationBodies.length, 2)
+    assert.equal(generationBodies.slice(1).length, 1)
     assert.equal(generationBodies[0]?.tools, undefined)
     assert.equal(generationBodies[0]?.reasoning_effort, 'none')
     assert.deepEqual(Object.keys(result).sort(), [

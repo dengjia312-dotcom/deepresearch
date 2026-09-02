@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { StaleTaskWriteError } from '../server/db/errors'
 import {
+  RESEARCH_AGENT_TOOL_REGISTRY,
   runResearchAgent,
   researchAgentTestApi,
 } from '../server/services/researchAgentService'
@@ -23,6 +24,17 @@ import {
   normalizeStoredResearchJobProgress,
   toPublicResearchJobProgress,
 } from '../server/types/researchJob'
+import {
+  DEFAULT_RESEARCH_TOOL_BUDGET,
+  ResearchToolExecutor,
+  type ResearchToolExecutorHooks,
+} from '../server/services/researchToolExecutor'
+import { ResearchToolRegistry } from '../server/services/researchToolRegistry'
+import type {
+  ResearchSearchSource,
+  ResearchToolAdapter,
+  ResearchToolDefinition,
+} from '../server/types/researchTool'
 
 const initialQueries: SearchQuery[] = [
   { id: 'query-1', query: '环境设计专业 就业趋势', purpose: '就业趋势', priority: 1 },
@@ -137,6 +149,60 @@ async function readSearchMetadata(metadata: Array<{
   }
 }
 
+function createMockToolExecutorFactory(options: {
+  search: (queries: SearchQuery[]) => Promise<ReturnType<typeof makeSearch>> | ReturnType<typeof makeSearch>
+  read?: (metadata: ResearchSearchSource[]) => ReturnType<typeof readSearchMetadata>
+}) {
+  return (hooks: ResearchToolExecutorHooks = {}) => {
+    const webAdapter: ResearchToolAdapter = async (call) => {
+      if (call.tool !== 'web_search') throw new Error('Unexpected mock Tool Call')
+      const result = await options.search(call.queries)
+      return {
+        executionId: call.executionId,
+        tool: 'web_search',
+        status: result.warnings.length > 0 ? 'partial' : 'success',
+        actualSourceCount: result.actualSourceCount,
+        deduplicatedSourceCount: result.deduplicatedSourceCount,
+        sources: result.metadata,
+        warnings: result.warnings,
+      }
+    }
+    const readAdapter: ResearchToolAdapter = async (call, context) => {
+      if (call.tool !== 'read_webpage') throw new Error('Unexpected mock Tool Call')
+      const result = await (options.read ?? readSearchMetadata)(
+        call.sources as ResearchSearchSource[],
+      )
+      for (let index = 0; index < result.readerStats.attemptedCount; index += 1) {
+        await context.onReaderCompleted?.('full_text')
+      }
+      return {
+        executionId: call.executionId,
+        tool: 'read_webpage',
+        status: result.warnings.length > 0 ? 'partial' : 'success',
+        ...result,
+      }
+    }
+    const base = {
+      description: 'Agent test Tool',
+      supportedSourceTypes: ['general_web'] as const,
+      costLevel: 'low' as const,
+      latencyLevel: 'low' as const,
+      maxCallsPerRun: 2,
+      enabled: true,
+      validateArguments: () => true,
+    }
+    const definitions: ResearchToolDefinition[] = [
+      { ...base, name: 'web_search', capabilities: ['discover_sources'], adapter: webAdapter },
+      { ...base, name: 'read_webpage', capabilities: ['extract_web_content'], adapter: readAdapter },
+    ]
+    return new ResearchToolExecutor(
+      new ResearchToolRegistry(definitions),
+      DEFAULT_RESEARCH_TOOL_BUDGET,
+      hooks,
+    )
+  }
+}
+
 test('Agent sufficient 时只执行 Initial QueryPlan 一轮且不修改 canonical strategy', async () => {
   const originalStrategy = JSON.stringify(strategy)
   const originalIntent = structuredClone(strategy.intent)
@@ -148,11 +214,12 @@ test('Agent sufficient 时只执行 Initial QueryPlan 一轮且不修改 canonic
   const result = await runResearchAgent(request, strategy, {
     onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
   }, {
-    search: async (_request, _strategy, queries) => {
-      searched.push(queries ?? [])
-      return makeSearch(1, queries ?? [])
-    },
-    read: async (metadata) => readSearchMetadata(metadata),
+    createToolExecutor: createMockToolExecutorFactory({
+      search: async (queries) => {
+        searched.push(queries)
+        return makeSearch(1, queries)
+      },
+    }),
     evaluate: async (input) => {
       evaluatorEvidence = input.evidence
       return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
@@ -169,6 +236,11 @@ test('Agent sufficient 时只执行 Initial QueryPlan 一轮且不修改 canonic
   )))
   assert.equal(checkpoints.at(-1)?.phase, 'completed')
   assert.equal(checkpoints.at(-1)?.evaluationStatus, 'sufficient')
+  assert.equal(checkpoints.at(-1)?.toolCallCount, 2)
+  assert.equal(checkpoints.at(-1)?.currentTool, null)
+  assert.ok(checkpoints.filter((item) => item.phase === 'evaluating').every(
+    (item) => item.currentTool === null,
+  ))
   assert.equal(result.metadata.length, result.evidenceSources.length)
 })
 
@@ -204,26 +276,27 @@ test('Agent insufficient 仅生成一次 Replan、执行第二轮并按 URL 合�
   const result = await runResearchAgent(request, strategy, {
     onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
   }, {
-    search: async (_request, _strategy, queries) => {
-      const executed = queries ?? []
-      searched.push(executed)
-      return makeSearch(searched.length, executed)
-    },
-    read: async (metadata) => {
-      readRound += 1
-      const result = await readSearchMetadata(metadata)
-      const shared = result.evidenceSources.find(
-        (item) => item.url === 'https://example.com/shared',
-      )
-      if (shared && readRound === 1) {
-        shared.evidenceType = 'partial'
-        shared.content = '第一轮 partial evidence'
-        result.readerStats.fullTextCount -= 1
-        result.readerStats.partialCount += 1
-      }
-      if (shared && readRound === 2) shared.content = '第二轮 upgraded full text evidence'
-      return result
-    },
+    createToolExecutor: createMockToolExecutorFactory({
+      search: async (queries) => {
+        searched.push(queries)
+        return makeSearch(searched.length, queries)
+      },
+      read: async (metadata) => {
+        readRound += 1
+        const result = await readSearchMetadata(metadata)
+        const shared = result.evidenceSources.find(
+          (item) => item.url === 'https://example.com/shared',
+        )
+        if (shared && readRound === 1) {
+          shared.evidenceType = 'partial'
+          shared.content = '第一轮 partial evidence'
+          result.readerStats.fullTextCount -= 1
+          result.readerStats.partialCount += 1
+        }
+        if (shared && readRound === 2) shared.content = '第二轮 upgraded full text evidence'
+        return result
+      },
+    }),
     evaluate: async (input) => {
       if (evaluationCount === 1) secondRoundEvidence = input.evidence
       return evaluations[evaluationCount++]!
@@ -235,6 +308,12 @@ test('Agent insufficient 仅生成一次 Replan、执行第二轮并按 URL 合�
   assert.equal(checkpoints.filter((item) => item.phase === 'replanning').length, 1)
   assert.equal(checkpoints.at(-1)?.currentRound, 2)
   assert.equal(checkpoints.at(-1)?.replanCount, researchAgentTestApi.maxReplans)
+  assert.equal(checkpoints.at(-1)?.toolCallCount, 4)
+  assert.deepEqual(checkpoints.at(-1)?.toolCallCounts, { web_search: 2, read_webpage: 2 })
+  assert.equal(checkpoints.at(-1)?.currentTool, null)
+  assert.ok(checkpoints.filter((item) => (
+    item.phase === 'evaluating' || item.phase === 'replanning' || item.phase === 'completed'
+  )).every((item) => item.currentTool === null))
   assert.equal(result.deduplicatedSourceCount, 3)
   assert.equal(result.metadata.length, 3)
   assert.equal(result.evidenceSources.length, 3)
@@ -269,11 +348,12 @@ test('Agent 第二轮仍 insufficient 时强制结束，不执行第三轮', asy
   let searchCount = 0
   let evaluationCount = 0
   const result = await runResearchAgent(request, strategy, {}, {
-    search: async (_request, _strategy, queries) => {
-      searchCount += 1
-      return makeSearch(searchCount, queries ?? [])
-    },
-    read: async (metadata) => readSearchMetadata(metadata),
+    createToolExecutor: createMockToolExecutorFactory({
+      search: async (queries) => {
+        searchCount += 1
+        return makeSearch(searchCount, queries)
+      },
+    }),
     evaluate: async () => {
       evaluationCount += 1
       return evaluationCount === 1
@@ -305,19 +385,22 @@ test('Agent 第二轮仍 insufficient 时强制结束，不执行第三轮', asy
 
 test('stale request 在进入 Round 2 前终止且不会继续调用 Search', async () => {
   let searchCount = 0
-  let assertionCount = 0
+  let stale = false
   await assert.rejects(
     runResearchAgent(request, strategy, {
       assertCurrent: () => {
-        assertionCount += 1
-        if (assertionCount === 5) throw new StaleTaskWriteError()
+        if (stale) throw new StaleTaskWriteError()
+      },
+      onCheckpoint: (checkpoint) => {
+        if (checkpoint.phase === 'replanning') stale = true
       },
     }, {
-      search: async (_request, _strategy, queries) => {
-        searchCount += 1
-        return makeSearch(searchCount, queries ?? [])
-      },
-      read: async (metadata) => readSearchMetadata(metadata),
+      createToolExecutor: createMockToolExecutorFactory({
+        search: async (queries) => {
+          searchCount += 1
+          return makeSearch(searchCount, queries)
+        },
+      }),
       evaluate: async () => ({
         status: 'insufficient',
         evidenceNeeds: [{
@@ -342,11 +425,46 @@ test('Agent 执行异常进入 failed 且保留原始错误', async () => {
     runResearchAgent(request, strategy, {
       onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
     }, {
-      search: async () => { throw expected },
+      createToolExecutor: createMockToolExecutorFactory({
+        search: async () => { throw expected },
+      }),
     }),
     (error) => error === expected,
   )
   assert.equal(checkpoints.at(-1)?.phase, 'failed')
+  assert.equal(checkpoints.at(-1)?.currentTool, null)
+  assert.equal(checkpoints.at(-1)?.toolCallCount, 1)
+})
+
+test('Tool 完成后 request stale 时不进入 Reader 或 Evaluator', async () => {
+  let stale = false
+  let readerCalls = 0
+  let evaluatorCalls = 0
+  await assert.rejects(
+    runResearchAgent(request, strategy, {
+      assertCurrent: () => {
+        if (stale) throw new StaleTaskWriteError()
+      },
+    }, {
+      createToolExecutor: createMockToolExecutorFactory({
+        search: async (queries) => {
+          stale = true
+          return makeSearch(1, queries)
+        },
+        read: async (metadata) => {
+          readerCalls += 1
+          return readSearchMetadata(metadata)
+        },
+      }),
+      evaluate: async () => {
+        evaluatorCalls += 1
+        return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
+      },
+    }),
+    StaleTaskWriteError,
+  )
+  assert.equal(readerCalls, 0)
+  assert.equal(evaluatorCalls, 0)
 })
 
 test('Evidence Evaluator 限制 Follow-up 数量、去重并拒绝 URL/排除含义', async () => {
@@ -438,6 +556,9 @@ test('Agent checkpoint JSONB roundtrip 保留内部状态但公开 DTO 只暴露
       priority: 1, round: 2, evidenceNeedIds: ['need-1'],
     }],
     evidenceCount: 4,
+    currentTool: 'web_search',
+    toolCallCount: 3,
+    toolCallCounts: { web_search: 2, read_webpage: 1 },
     updatedAt: '2026-09-01T00:00:00.000Z',
   }
   const storedInput = { ...emptyResearchJobProgress(), agentState: checkpoint }
@@ -446,14 +567,44 @@ test('Agent checkpoint JSONB roundtrip 保留内部状态但公开 DTO 只暴露
   const publicProgress = toPublicResearchJobProgress(storedInput)
   assert.equal(publicProgress.agent?.followUpQueryCount, 1)
   assert.equal(publicProgress.agent?.evidenceNeedCount, 1)
-  assert.doesNotMatch(JSON.stringify(publicProgress), /内部完整查询|内部缺口|内部描述/)
+  assert.equal(publicProgress.agent?.currentTool, 'web_search')
+  assert.equal(publicProgress.agent?.toolCallCount, 3)
+  assert.doesNotMatch(
+    JSON.stringify(publicProgress),
+    /内部完整查询|内部缺口|内部描述|executionId|toolCallCounts|arguments|https:\/\//,
+  )
+  const unsafePublicProgress = toPublicResearchJobProgress({
+    ...emptyResearchJobProgress(),
+    agentState: {
+      ...checkpoint,
+      arguments: { query: '敏感 Query', url: 'https://secret.example.com' },
+      executionId: 'secret-execution-id',
+      result: { providerResponse: 'secret-response' },
+    },
+  })
+  assert.doesNotMatch(
+    JSON.stringify(unsafePublicProgress),
+    /敏感 Query|secret\.example|secret-execution-id|secret-response|arguments|result/,
+  )
+
+  const legacyCheckpoint = structuredClone(checkpoint)
+  delete legacyCheckpoint.currentTool
+  delete legacyCheckpoint.toolCallCount
+  delete legacyCheckpoint.toolCallCounts
+  const legacyProgress = toPublicResearchJobProgress({
+    ...emptyResearchJobProgress(),
+    agentState: legacyCheckpoint,
+  })
+  assert.equal(legacyProgress.agent?.currentTool, null)
+  assert.equal(legacyProgress.agent?.toolCallCount, 0)
 })
 
 test('Agent v1 硬边界与 Tool Registry 固定且不写用户资料池', () => {
   assert.equal(researchAgentTestApi.maxRounds, 2)
   assert.equal(researchAgentTestApi.maxReplans, 1)
   assert.equal(researchAgentTestApi.maxFollowUpQueries, 3)
+  assert.deepEqual(RESEARCH_AGENT_TOOL_REGISTRY, ['web_search', 'read_webpage'])
   const source = readFileSync('server/services/researchAgentService.ts', 'utf8')
-  assert.match(source, /'web_search', 'read_webpage'/)
+  assert.doesNotMatch(source, /searchResearchSourcesWithGlm|enrichResearchSourcesWithGlm/)
   assert.doesNotMatch(source, /research_pool_items|addOwnedPoolItem/)
 })

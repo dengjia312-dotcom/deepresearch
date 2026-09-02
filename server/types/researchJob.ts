@@ -1,4 +1,9 @@
-import type { ResearchAgentCheckpoint, ResearchAgentPhase, ResearchResponse } from './research'
+import type {
+  ResearchAgentCheckpoint,
+  ResearchAgentPhase,
+  ResearchResponse,
+  ResearchToolName,
+} from './research'
 
 export type ResearchJobStatus = 'queued' | 'running' | 'completed' | 'failed'
 export type ResearchJobPhase =
@@ -40,6 +45,8 @@ export interface PublicResearchAgentProgress {
   satisfiedEvidenceNeedCount: number
   followUpQueryCount: number
   evidenceCount: number
+  currentTool: ResearchToolName | null
+  toolCallCount: number
 }
 
 export interface ResearchJobProgress extends ResearchJobCounterProgress {
@@ -101,6 +108,19 @@ function parseAgentCheckpoint(value: unknown): ResearchAgentCheckpoint | null {
   const validEvaluation = [
     'not_started', 'evaluating', 'sufficient', 'insufficient',
   ].includes(String(value.evaluationStatus))
+  const validCurrentTool = value.currentTool === undefined
+    || value.currentTool === null
+    || value.currentTool === 'web_search'
+    || value.currentTool === 'read_webpage'
+  const validToolCallCount = value.toolCallCount === undefined
+    || (Number.isSafeInteger(value.toolCallCount) && Number(value.toolCallCount) >= 0)
+  const validToolCallCounts = value.toolCallCounts === undefined || (
+    isRecord(value.toolCallCounts)
+    && ['web_search', 'read_webpage'].every((tool) => {
+      const count = value.toolCallCounts && Reflect.get(value.toolCallCounts, tool)
+      return count === undefined || (Number.isSafeInteger(count) && Number(count) >= 0)
+    })
+  )
   if (
     value.version !== 1
     || (value.currentRound !== 1 && value.currentRound !== 2)
@@ -109,6 +129,9 @@ function parseAgentCheckpoint(value: unknown): ResearchAgentCheckpoint | null {
     || value.maxReplans !== 1
     || !validPhase
     || !validEvaluation
+    || !validCurrentTool
+    || !validToolCallCount
+    || !validToolCallCounts
     || !Array.isArray(value.evidenceNeeds)
     || !Array.isArray(value.followUpQueries)
     || !Number.isSafeInteger(value.evidenceCount)
@@ -142,6 +165,8 @@ export function toPublicResearchJobProgress(value: unknown): ResearchJobProgress
       ).length,
       followUpQueryCount: checkpoint.followUpQueries.length,
       evidenceCount: checkpoint.evidenceCount,
+      currentTool: checkpoint.currentTool ?? null,
+      toolCallCount: checkpoint.toolCallCount ?? 0,
     },
   }
 }

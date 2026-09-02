@@ -116,6 +116,12 @@ function normalizeResearchJobProgress(value: unknown): ResearchJobProgress | nul
     if (!Number.isSafeInteger(candidate[key]) || (candidate[key] ?? -1) < 0) return null
   }
   const agent = candidate.agent
+  const validCurrentTool = agent?.currentTool === undefined
+    || agent.currentTool === null
+    || agent.currentTool === 'web_search'
+    || agent.currentTool === 'read_webpage'
+  const validToolCallCount = agent?.toolCallCount === undefined
+    || (Number.isSafeInteger(agent.toolCallCount) && agent.toolCallCount >= 0)
   const validAgent = agent
     && (agent.currentRound === 1 || agent.currentRound === 2)
     && agent.maxRounds === 2
@@ -126,13 +132,32 @@ function normalizeResearchJobProgress(value: unknown): ResearchJobProgress | nul
     ].includes(agent.phase)
     && ['not_started', 'evaluating', 'sufficient', 'insufficient']
       .includes(agent.evaluationStatus)
+    && validCurrentTool
+    && validToolCallCount
     && [
       agent.evidenceNeedCount,
       agent.satisfiedEvidenceNeedCount,
       agent.followUpQueryCount,
       agent.evidenceCount,
     ].every((count) => Number.isSafeInteger(count) && count >= 0)
-  return { ...empty, ...candidate, agent: validAgent ? agent : undefined }
+  const normalizedAgent = validAgent ? {
+    currentRound: agent.currentRound,
+    maxRounds: agent.maxRounds,
+    replanCount: agent.replanCount,
+    phase: agent.phase,
+    evaluationStatus: agent.evaluationStatus,
+    evidenceNeedCount: agent.evidenceNeedCount,
+    satisfiedEvidenceNeedCount: agent.satisfiedEvidenceNeedCount,
+    followUpQueryCount: agent.followUpQueryCount,
+    evidenceCount: agent.evidenceCount,
+    currentTool: agent.currentTool ?? null,
+    toolCallCount: agent.toolCallCount ?? 0,
+  } : undefined
+  return {
+    ...empty,
+    ...Object.fromEntries(counterKeys.map((key) => [key, candidate[key]])),
+    agent: normalizedAgent,
+  } as ResearchJobProgress
 }
 
 function createRequestState(

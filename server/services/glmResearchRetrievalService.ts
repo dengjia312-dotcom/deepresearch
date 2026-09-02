@@ -8,6 +8,13 @@ import type {
   SearchQuery,
   VerifiedSearchMetadata,
 } from '../types/research'
+import type {
+  ResearchReaderFailureCategory,
+  ResearchReaderStats,
+  ResearchReaderStatus,
+  ResearchSearchRelevance,
+  ResearchSearchSource,
+} from '../types/researchTool'
 import { ResearchServiceError } from './serviceError'
 import { asString, isRecord } from './serviceUtils'
 import { generateContent, parseGeneratedJson } from './generation/generationService'
@@ -43,15 +50,8 @@ interface GlmJsonResponse {
   payload: unknown
 }
 
-export type GlmReaderStatus = 'full_text' | 'partial' | 'insufficient' | 'unavailable'
-export type GlmReaderFailureCategory =
-  | 'HTTP_4XX'
-  | 'HTTP_5XX'
-  | 'TIMEOUT'
-  | 'NETWORK'
-  | 'INVALID_RESPONSE'
-  | 'EMPTY_CONTENT'
-  | 'UNKNOWN'
+export type GlmReaderStatus = ResearchReaderStatus
+export type GlmReaderFailureCategory = ResearchReaderFailureCategory
 
 export interface GlmReaderResult {
   status: GlmReaderStatus
@@ -61,17 +61,7 @@ export interface GlmReaderResult {
   failureCategory?: GlmReaderFailureCategory | null
 }
 
-export interface GlmReaderStats {
-  attemptedCount: number
-  fullTextCount: number
-  partialCount: number
-  insufficientCount: number
-  failedCount: number
-  searchSummaryCount: number
-  averageContentLength: number
-  failureCategories: Record<GlmReaderFailureCategory, number>
-  httpStatusCounts: Record<string, number>
-}
+export type GlmReaderStats = ResearchReaderStats
 
 export interface GlmResearchRetrievalResult {
   actualSourceCount: number
@@ -88,12 +78,20 @@ interface SearchMappingResult {
   deduplicatedMetadata: VerifiedSearchMetadata[]
 }
 
-type SourceRelevance = 'high' | 'medium' | 'low' | 'uncertain'
-export interface GlmSearchCandidate extends VerifiedSearchMetadata {
-  candidateId: string
-  matchedQueryIds: string[]
-  sourceCategory: ResearchAgentSourceType
-  relevance: SourceRelevance
+type SourceRelevance = ResearchSearchRelevance
+export type GlmSearchCandidate = ResearchSearchSource
+
+export interface GlmSearchResult {
+  actualSourceCount: number
+  deduplicatedSourceCount: number
+  metadata: GlmSearchCandidate[]
+  warnings: string[]
+}
+
+export interface GlmReaderBatchResult {
+  evidenceSources: ResearchSynthesisEvidence[]
+  readerStats: GlmReaderStats
+  warnings: string[]
 }
 
 interface SearchQueryResult {
@@ -442,7 +440,7 @@ export async function searchResearchSourcesWithGlm(
   request: ResearchRequest,
   strategy: ResearchStrategy = resolveResearchStrategy(request),
   queriesOverride?: SearchQuery[],
-) {
+): Promise<GlmSearchResult> {
   const startedAt = Date.now()
   const queries = (queriesOverride ?? strategy.queryPlan.queries).slice(0, 4)
   const concurrency = Math.min(
@@ -627,7 +625,7 @@ function buildEvidenceContent(source: VerifiedSearchMetadata, reader: GlmReaderR
 export async function enrichResearchSourcesWithGlm(
   metadata: VerifiedSearchMetadata[],
   dependencies: ReaderDependencies = {},
-) {
+): Promise<GlmReaderBatchResult> {
   const startedAt = Date.now()
   const readSource = dependencies.readSource ?? readResearchSourceWithGlm
   const concurrency = Math.min(

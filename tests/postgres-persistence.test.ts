@@ -622,6 +622,9 @@ pgTest('Agent checkpoint 使用 progress JSONB 持久化、公开脱敏并受 re
       priority: 1, round: 2, evidenceNeedIds: ['need-1'],
     }],
     evidenceCount: 4,
+    currentTool: 'read_webpage',
+    toolCallCount: 4,
+    toolCallCounts: { web_search: 2, read_webpage: 2 },
     updatedAt: new Date().toISOString(),
   }
   await updateResearchJobAgentCheckpoint(identity, checkpoint, pool)
@@ -635,6 +638,8 @@ pgTest('Agent checkpoint 使用 progress JSONB 持久化、公开脱敏并受 re
   assert.deepEqual(raw.rows[0]?.progress.agentState, checkpoint)
   const publicJob = await getOwnedResearchJob(ownerId, identity.jobId, pool)
   assert.equal(publicJob.progress.agent?.followUpQueryCount, 1)
+  assert.equal(publicJob.progress.agent?.currentTool, 'read_webpage')
+  assert.equal(publicJob.progress.agent?.toolCallCount, 4)
   assert.doesNotMatch(JSON.stringify(publicJob.progress), /内部完整查询|内部缺口|内部描述/)
 
   await createOrReuseOwnedResearchJob(
