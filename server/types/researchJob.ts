@@ -112,11 +112,12 @@ function parseAgentCheckpoint(value: unknown): ResearchAgentCheckpoint | null {
     || value.currentTool === null
     || value.currentTool === 'web_search'
     || value.currentTool === 'read_webpage'
+    || value.currentTool === 'http_fetch'
   const validToolCallCount = value.toolCallCount === undefined
     || (Number.isSafeInteger(value.toolCallCount) && Number(value.toolCallCount) >= 0)
   const validToolCallCounts = value.toolCallCounts === undefined || (
     isRecord(value.toolCallCounts)
-    && ['web_search', 'read_webpage'].every((tool) => {
+    && ['web_search', 'read_webpage', 'http_fetch'].every((tool) => {
       const count = value.toolCallCounts && Reflect.get(value.toolCallCounts, tool)
       return count === undefined || (Number.isSafeInteger(count) && Number(count) >= 0)
     })

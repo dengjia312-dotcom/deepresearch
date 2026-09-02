@@ -143,7 +143,7 @@ function createCheckpoint(): ResearchAgentCheckpoint {
     evidenceCount: 0,
     currentTool: null,
     toolCallCount: 0,
-    toolCallCounts: { web_search: 0, read_webpage: 0 },
+    toolCallCounts: { web_search: 0, read_webpage: 0, http_fetch: 0 },
     updatedAt: now(),
   }
 }

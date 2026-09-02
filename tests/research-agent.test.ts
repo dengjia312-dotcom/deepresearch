@@ -237,6 +237,7 @@ test('Agent sufficient 时只执行 Initial QueryPlan 一轮且不修改 canonic
   assert.equal(checkpoints.at(-1)?.phase, 'completed')
   assert.equal(checkpoints.at(-1)?.evaluationStatus, 'sufficient')
   assert.equal(checkpoints.at(-1)?.toolCallCount, 2)
+  assert.equal(checkpoints.at(-1)?.toolCallCounts?.http_fetch, 0)
   assert.equal(checkpoints.at(-1)?.currentTool, null)
   assert.ok(checkpoints.filter((item) => item.phase === 'evaluating').every(
     (item) => item.currentTool === null,
@@ -309,8 +310,13 @@ test('Agent insufficient 仅生成一次 Replan、执行第二轮并按 URL 合�
   assert.equal(checkpoints.at(-1)?.currentRound, 2)
   assert.equal(checkpoints.at(-1)?.replanCount, researchAgentTestApi.maxReplans)
   assert.equal(checkpoints.at(-1)?.toolCallCount, 4)
-  assert.deepEqual(checkpoints.at(-1)?.toolCallCounts, { web_search: 2, read_webpage: 2 })
+  assert.deepEqual(checkpoints.at(-1)?.toolCallCounts, {
+    web_search: 2,
+    read_webpage: 2,
+    http_fetch: 0,
+  })
   assert.equal(checkpoints.at(-1)?.currentTool, null)
+  assert.equal(checkpoints.at(-1)?.toolCallCounts?.http_fetch, 0)
   assert.ok(checkpoints.filter((item) => (
     item.phase === 'evaluating' || item.phase === 'replanning' || item.phase === 'completed'
   )).every((item) => item.currentTool === null))
@@ -603,8 +609,9 @@ test('Agent v1 硬边界与 Tool Registry 固定且不写用户资料池', () =>
   assert.equal(researchAgentTestApi.maxRounds, 2)
   assert.equal(researchAgentTestApi.maxReplans, 1)
   assert.equal(researchAgentTestApi.maxFollowUpQueries, 3)
-  assert.deepEqual(RESEARCH_AGENT_TOOL_REGISTRY, ['web_search', 'read_webpage'])
+  assert.deepEqual(RESEARCH_AGENT_TOOL_REGISTRY, ['web_search', 'read_webpage', 'http_fetch'])
   const source = readFileSync('server/services/researchAgentService.ts', 'utf8')
   assert.doesNotMatch(source, /searchResearchSourcesWithGlm|enrichResearchSourcesWithGlm/)
+  assert.doesNotMatch(source, /tool:\s*['"]http_fetch['"]/)
   assert.doesNotMatch(source, /research_pool_items|addOwnedPoolItem/)
 })

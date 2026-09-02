@@ -3,7 +3,11 @@ import {
   ResearchToolRuntimeError,
   type ResearchToolDefinition,
 } from '../types/researchTool'
-import { readWebpageToolAdapter, webSearchToolAdapter } from './researchToolAdapters'
+import {
+  httpFetchToolAdapter,
+  readWebpageToolAdapter,
+  webSearchToolAdapter,
+} from './researchToolAdapters'
 
 const SOURCE_TYPES = Object.freeze<ResearchAgentSourceType[]>([
   'official',
@@ -71,12 +75,32 @@ function isValidSource(value: unknown) {
   }
 }
 
+function isValidSearchSource(value: unknown) {
+  if (!isRecord(value) || !isValidSource(value)) return false
+  return typeof value.candidateId === 'string'
+    && value.candidateId.trim().length > 0
+    && Array.isArray(value.matchedQueryIds)
+    && value.matchedQueryIds.length > 0
+    && value.matchedQueryIds.every((item) => typeof item === 'string' && item.length > 0)
+    && SOURCE_TYPES.includes(value.sourceCategory as ResearchAgentSourceType)
+    && ['high', 'medium', 'low', 'uncertain'].includes(String(value.relevance))
+}
+
 function validateReadWebpageCall(value: unknown) {
   return hasValidBase(value, 'read_webpage')
     && Array.isArray(value.sources)
     && value.sources.length >= 1
     && value.sources.length <= 16
     && value.sources.every(isValidSource)
+}
+
+function validateHttpFetchCall(value: unknown) {
+  return hasValidBase(value, 'http_fetch')
+    && Array.isArray(value.sources)
+    && value.sources.length >= 1
+    && value.sources.length <= 8
+    && value.sources.every(isValidSearchSource)
+    && new Set(value.sources.map((source) => source.candidateId)).size === value.sources.length
 }
 
 function freezeDefinition(definition: ResearchToolDefinition): ResearchToolDefinition {
@@ -138,9 +162,22 @@ export const defaultResearchToolRegistry = new ResearchToolRegistry([
     validateArguments: validateReadWebpageCall,
     adapter: readWebpageToolAdapter,
   },
+  {
+    name: 'http_fetch',
+    description: '通过 SSRF-safe HTTP transport 提取已授权 Search Source 的静态正文。',
+    capabilities: ['fetch_static_content'],
+    supportedSourceTypes: SOURCE_TYPES,
+    costLevel: 'low',
+    latencyLevel: 'low',
+    maxCallsPerRun: 2,
+    enabled: true,
+    validateArguments: validateHttpFetchCall,
+    adapter: httpFetchToolAdapter,
+  },
 ])
 
 export const researchToolRegistryTestApi = {
   validateWebSearchCall,
   validateReadWebpageCall,
+  validateHttpFetchCall,
 }

@@ -8,7 +8,10 @@ import type {
   VerifiedSearchMetadata,
 } from './research'
 
-export type ResearchToolCapability = 'discover_sources' | 'extract_web_content'
+export type ResearchToolCapability =
+  | 'discover_sources'
+  | 'extract_web_content'
+  | 'fetch_static_content'
 export type ResearchToolCostLevel = 'low' | 'medium' | 'high'
 export type ResearchToolLatencyLevel = 'low' | 'medium' | 'high'
 export type ResearchToolResultStatus = 'success' | 'partial'
@@ -60,7 +63,12 @@ export interface ReadWebpageToolCall extends ResearchToolCallBase {
   sources: VerifiedSearchMetadata[]
 }
 
-export type ResearchToolCall = WebSearchToolCall | ReadWebpageToolCall
+export interface HttpFetchToolCall extends ResearchToolCallBase {
+  tool: 'http_fetch'
+  sources: ResearchSearchSource[]
+}
+
+export type ResearchToolCall = WebSearchToolCall | ReadWebpageToolCall | HttpFetchToolCall
 
 interface ResearchToolResultBase {
   executionId: string
@@ -82,13 +90,67 @@ export interface ReadWebpageToolResult extends ResearchToolResultBase {
   readerStats: ResearchReaderStats
 }
 
-export type ResearchToolResult = WebSearchToolResult | ReadWebpageToolResult
+export type HttpFetchFailureCode =
+  | 'UNSAFE_URL'
+  | 'UNSUPPORTED_PROTOCOL'
+  | 'SOURCE_NOT_AUTHORIZED'
+  | 'DNS_RESOLUTION_FAILED'
+  | 'PRIVATE_ADDRESS_BLOCKED'
+  | 'REDIRECT_BLOCKED'
+  | 'TOO_MANY_REDIRECTS'
+  | 'REDIRECT_LOOP'
+  | 'TIMEOUT'
+  | 'RESPONSE_TOO_LARGE'
+  | 'UNSUPPORTED_CONTENT_TYPE'
+  | 'UNSUPPORTED_CONTENT_ENCODING'
+  | 'HTTP_ERROR'
+  | 'EMPTY_CONTENT'
+  | 'UNSUPPORTED_CHARSET'
+  | 'PARSE_FAILED'
+  | 'NETWORK_ERROR'
+
+export interface HttpFetchExtractionMetrics {
+  paragraphCount: number
+  linkDensity: number
+  confidence: number
+}
+
+export interface HttpFetchItemResult {
+  candidateId: string
+  status: 'full_text' | 'partial' | 'failed'
+  finalUrl?: string
+  title?: string
+  content: string
+  contentLength: number
+  contentType?: string
+  failureCode?: HttpFetchFailureCode
+  extraction?: HttpFetchExtractionMetrics
+  fetchMetadata: {
+    httpStatus?: number
+    redirectCount: number
+    durationMs: number
+  }
+}
+
+export interface HttpFetchToolResult extends ResearchToolResultBase {
+  tool: 'http_fetch'
+  items: HttpFetchItemResult[]
+  successfulCount: number
+  failedCount: number
+}
+
+export type ResearchToolResult =
+  | WebSearchToolResult
+  | ReadWebpageToolResult
+  | HttpFetchToolResult
 
 export interface ResearchToolExecutionContext {
   request: Readonly<ResearchRequest>
   strategy: Readonly<ResearchStrategy>
   assertCurrent?: () => Promise<void> | void
   onReaderCompleted?: (status: ResearchReaderStatus) => Promise<void> | void
+  /** Server-owned sources returned by web_search in the current Research round. */
+  authorizedSearchSources?: readonly ResearchSearchSource[]
 }
 
 export type ResearchToolAdapter = (
@@ -124,6 +186,7 @@ export type ResearchToolRuntimeErrorCode =
   | 'RESEARCH_TOOL_UNAVAILABLE'
   | 'RESEARCH_TOOL_ARGUMENTS_INVALID'
   | 'RESEARCH_TOOL_BUDGET_EXCEEDED'
+  | 'RESEARCH_TOOL_PROVENANCE_INVALID'
 
 export class ResearchToolRuntimeError extends Error {
   constructor(

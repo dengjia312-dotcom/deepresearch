@@ -10,10 +10,11 @@ import {
 import { defaultResearchToolRegistry, ResearchToolRegistry } from './researchToolRegistry'
 
 export const DEFAULT_RESEARCH_TOOL_BUDGET: ResearchToolBudget = Object.freeze({
-  maxTotalCalls: 4,
+  maxTotalCalls: 6,
   maxCallsByTool: Object.freeze({
     web_search: 2,
     read_webpage: 2,
+    http_fetch: 2,
   }),
 })
 
@@ -39,7 +40,7 @@ export class ResearchToolExecutor {
   private readonly progress: ResearchToolProgress = {
     currentTool: null,
     toolCallCount: 0,
-    toolCallCounts: { web_search: 0, read_webpage: 0 },
+    toolCallCounts: { web_search: 0, read_webpage: 0, http_fetch: 0 },
   }
 
   constructor(

@@ -246,7 +246,7 @@ export type ResearchAgentSourceType =
   | 'community'
   | 'general_web'
 
-export type ResearchToolName = 'web_search' | 'read_webpage'
+export type ResearchToolName = 'web_search' | 'read_webpage' | 'http_fetch'
 
 export type ResearchAgentAcquisitionTool = ResearchToolName
 

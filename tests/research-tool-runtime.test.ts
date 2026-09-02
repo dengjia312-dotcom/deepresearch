@@ -107,7 +107,11 @@ function definition(
   return {
     name,
     description: `${name} test definition`,
-    capabilities: name === 'web_search' ? ['discover_sources'] : ['extract_web_content'],
+    capabilities: name === 'web_search'
+      ? ['discover_sources']
+      : name === 'http_fetch'
+        ? ['fetch_static_content']
+        : ['extract_web_content'],
     supportedSourceTypes: ['general_web'],
     costLevel: 'low',
     latencyLevel: 'low',
@@ -134,10 +138,10 @@ function readCall(): ResearchToolCall {
   }
 }
 
-test('默认 Research Tool Registry 只读且只注册两个生产 Tool', () => {
+test('默认 Research Tool Registry 只读且精确注册三个生产 Tool', () => {
   assert.deepEqual(
     defaultResearchToolRegistry.list().map((item) => item.name),
-    ['web_search', 'read_webpage'],
+    ['web_search', 'read_webpage', 'http_fetch'],
   )
   assert.ok(Object.isFrozen(defaultResearchToolRegistry.list()[0]))
   assert.ok(Object.isFrozen(defaultResearchToolRegistry.list()[0]?.capabilities))
@@ -197,7 +201,7 @@ test('invalid arguments 不执行 Adapter 且不消耗 budget', async () => {
   assert.deepEqual(executor.getSnapshot(), {
     currentTool: null,
     toolCallCount: 0,
-    toolCallCounts: { web_search: 0, read_webpage: 0 },
+    toolCallCounts: { web_search: 0, read_webpage: 0, http_fetch: 0 },
   })
 })
 
@@ -209,7 +213,7 @@ test('Executor total 与 per-tool invocation budget 均生效', async () => {
   ])
   const totalBudget: ResearchToolBudget = {
     maxTotalCalls: 1,
-    maxCallsByTool: { web_search: 2, read_webpage: 2 },
+    maxCallsByTool: { web_search: 2, read_webpage: 2, http_fetch: 2 },
   }
   const totalExecutor = new ResearchToolExecutor(registry, totalBudget)
   await totalExecutor.execute(call(), context)
@@ -221,7 +225,7 @@ test('Executor total 与 per-tool invocation budget 均生效', async () => {
 
   const perToolBudget: ResearchToolBudget = {
     maxTotalCalls: 4,
-    maxCallsByTool: { web_search: 1, read_webpage: 2 },
+    maxCallsByTool: { web_search: 1, read_webpage: 2, http_fetch: 2 },
   }
   const perToolExecutor = new ResearchToolExecutor(registry, perToolBudget)
   await perToolExecutor.execute(call(), context)
