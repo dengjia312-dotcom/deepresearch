@@ -119,6 +119,7 @@ function normalizeResearchJobProgress(value: unknown): ResearchJobProgress | nul
   const validCurrentTool = agent?.currentTool === undefined
     || agent.currentTool === null
     || agent.currentTool === 'web_search'
+    || agent.currentTool === 'http_fetch'
     || agent.currentTool === 'read_webpage'
   const validToolCallCount = agent?.toolCallCount === undefined
     || (Number.isSafeInteger(agent.toolCallCount) && agent.toolCallCount >= 0)

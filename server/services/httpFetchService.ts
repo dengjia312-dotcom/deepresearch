@@ -648,13 +648,12 @@ export function createHttpFetchEvidenceCandidate(
 ): ResearchEvidenceUpgradeCandidate | null {
   if (item.status === 'failed' || !item.extraction || item.contentLength < 300) return null
   const evidenceType = item.status === 'full_text' ? 'full_text' : 'partial'
-  const url = item.finalUrl ?? source.url
   return {
     evidence: {
       evidenceId,
       normalizedUrl: normalizedEvidenceUrl(source.url),
       metadata: {
-        url,
+        url: source.url,
         title: item.title ?? source.title,
         publisher: source.publisher,
         publishedAt: source.publishedAt,

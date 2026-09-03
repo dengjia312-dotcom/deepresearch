@@ -104,8 +104,10 @@ export function SearchResultsPage() {
   const agentProgressMessage = agent
     ? agent.currentTool === 'web_search'
       ? '正在搜索相关资料…'
+      : agent.currentTool === 'http_fetch'
+        ? '正在获取网页内容…'
       : agent.currentTool === 'read_webpage'
-        ? '正在读取网页正文…'
+        ? '正在深入读取部分资料…'
         : agent.phase === 'evaluating'
       ? `正在评估第 ${agent.currentRound} 轮证据完整性…`
       : agent.phase === 'replanning'

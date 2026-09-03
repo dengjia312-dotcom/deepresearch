@@ -31,10 +31,12 @@ import {
 } from '../server/services/researchToolExecutor'
 import { ResearchToolRegistry } from '../server/services/researchToolRegistry'
 import type {
+  HttpFetchItemResult,
   ResearchSearchSource,
   ResearchToolAdapter,
   ResearchToolDefinition,
 } from '../server/types/researchTool'
+import { ResearchServiceError } from '../server/services/serviceError'
 
 const initialQueries: SearchQuery[] = [
   { id: 'query-1', query: '环境设计专业 就业趋势', purpose: '就业趋势', priority: 1 },
@@ -94,6 +96,10 @@ function makeSearch(round: number, queries: SearchQuery[]) {
   const urls = round === 1
     ? ['https://example.com/shared', 'https://example.com/round-1']
     : ['https://example.com/shared', 'https://example.com/round-2']
+  return makeSearchWithUrls(round, queries, urls)
+}
+
+function makeSearchWithUrls(round: number, queries: SearchQuery[], urls: string[]) {
   return {
     actualSourceCount: urls.length,
     deduplicatedSourceCount: urls.length,
@@ -149,8 +155,44 @@ async function readSearchMetadata(metadata: Array<{
   }
 }
 
+function httpItem(
+  source: ResearchSearchSource,
+  status: HttpFetchItemResult['status'] = 'failed',
+  overrides: Partial<HttpFetchItemResult> = {},
+): HttpFetchItemResult {
+  if (status === 'failed') {
+    return {
+      candidateId: source.candidateId,
+      status,
+      content: '',
+      contentLength: 0,
+      failureCode: 'TIMEOUT',
+      fetchMetadata: { redirectCount: 0, durationMs: 5 },
+      ...overrides,
+    }
+  }
+  const contentLength = status === 'full_text' ? 1_500 : 700
+  return {
+    candidateId: source.candidateId,
+    status,
+    finalUrl: `${source.url}/redirected`,
+    title: `${source.title} HTTP`,
+    content: `${status} HTTP evidence `.repeat(100).slice(0, contentLength),
+    contentLength,
+    contentType: 'text/html',
+    extraction: {
+      paragraphCount: status === 'full_text' ? 6 : 3,
+      linkDensity: 0.05,
+      confidence: status === 'full_text' ? 0.92 : 0.72,
+    },
+    fetchMetadata: { redirectCount: 1, durationMs: 5, httpStatus: 200 },
+    ...overrides,
+  }
+}
+
 function createMockToolExecutorFactory(options: {
   search: (queries: SearchQuery[]) => Promise<ReturnType<typeof makeSearch>> | ReturnType<typeof makeSearch>
+  http?: (sources: ResearchSearchSource[]) => HttpFetchItemResult[] | Promise<HttpFetchItemResult[]>
   read?: (metadata: ResearchSearchSource[]) => ReturnType<typeof readSearchMetadata>
 }) {
   return (hooks: ResearchToolExecutorHooks = {}) => {
@@ -182,6 +224,22 @@ function createMockToolExecutorFactory(options: {
         ...result,
       }
     }
+    const httpAdapter: ResearchToolAdapter = async (call) => {
+      if (call.tool !== 'http_fetch') throw new Error('Unexpected mock Tool Call')
+      const items = await (options.http
+        ? options.http(call.sources)
+        : call.sources.map((source) => httpItem(source)))
+      const successfulCount = items.filter((item) => item.status !== 'failed').length
+      return {
+        executionId: call.executionId,
+        tool: 'http_fetch',
+        status: successfulCount === items.length ? 'success' : 'partial',
+        items,
+        successfulCount,
+        failedCount: items.length - successfulCount,
+        warnings: [],
+      }
+    }
     const base = {
       description: 'Agent test Tool',
       supportedSourceTypes: ['general_web'] as const,
@@ -193,6 +251,7 @@ function createMockToolExecutorFactory(options: {
     }
     const definitions: ResearchToolDefinition[] = [
       { ...base, name: 'web_search', capabilities: ['discover_sources'], adapter: webAdapter },
+      { ...base, name: 'http_fetch', capabilities: ['fetch_static_content'], adapter: httpAdapter },
       { ...base, name: 'read_webpage', capabilities: ['extract_web_content'], adapter: readAdapter },
     ]
     return new ResearchToolExecutor(
@@ -236,13 +295,225 @@ test('Agent sufficient 时只执行 Initial QueryPlan 一轮且不修改 canonic
   )))
   assert.equal(checkpoints.at(-1)?.phase, 'completed')
   assert.equal(checkpoints.at(-1)?.evaluationStatus, 'sufficient')
-  assert.equal(checkpoints.at(-1)?.toolCallCount, 2)
-  assert.equal(checkpoints.at(-1)?.toolCallCounts?.http_fetch, 0)
+  assert.equal(checkpoints.at(-1)?.toolCallCount, 3)
+  assert.equal(checkpoints.at(-1)?.toolCallCounts?.http_fetch, 1)
   assert.equal(checkpoints.at(-1)?.currentTool, null)
   assert.ok(checkpoints.filter((item) => item.phase === 'evaluating').every(
     (item) => item.currentTool === null,
   ))
   assert.equal(result.metadata.length, result.evidenceSources.length)
+})
+
+test('HTTP-first 全部 full_text 时只 Fetch 前 8 条、跳过 Reader 并保留原 Citation URL', async () => {
+  const urls = Array.from({ length: 10 }, (_, index) => `https://example.com/http-full-${index + 1}`)
+  const checkpoints: ResearchAgentCheckpoint[] = []
+  const readerTargets: number[] = []
+  let readerCalls = 0
+  let evaluatorEvidence: ResearchAgentEvidenceRecord[] = []
+  const originalIntent = structuredClone(strategy.intent)
+  const originalQueryPlan = structuredClone(strategy.queryPlan)
+  const result = await runResearchAgent(request, strategy, {
+    onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
+    onReaderStarted: (count) => { readerTargets.push(count) },
+  }, {
+    createToolExecutor: createMockToolExecutorFactory({
+      search: (queries) => makeSearchWithUrls(1, queries, urls),
+      http: (sources) => {
+        assert.equal(sources.length, 8)
+        return sources.map((source) => httpItem(source, 'full_text'))
+      },
+      read: async (sources) => {
+        readerCalls += 1
+        return readSearchMetadata(sources)
+      },
+    }),
+    evaluate: async (input) => {
+      evaluatorEvidence = input.evidence
+      return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
+    },
+  })
+  assert.equal(readerCalls, 0)
+  assert.deepEqual(readerTargets, [])
+  assert.equal(checkpoints.at(-1)?.toolCallCount, 2)
+  assert.deepEqual(checkpoints.at(-1)?.toolCallCounts, {
+    web_search: 1,
+    read_webpage: 0,
+    http_fetch: 1,
+  })
+  assert.equal(evaluatorEvidence.filter((item) => item.evidenceType === 'full_text').length, 8)
+  assert.equal(evaluatorEvidence.filter((item) => item.evidenceType === 'search_summary').length, 2)
+  assert.ok(evaluatorEvidence.slice(0, 8).every((item) => (
+    item.bindings.some((binding) => binding.acquisitionTool === 'web_search')
+    && item.bindings.some((binding) => binding.acquisitionTool === 'http_fetch')
+  )))
+  assert.equal(result.metadata.length, 10)
+  assert.deepEqual(result.metadata.map((item) => item.url), result.evidenceSources.map((item) => item.url))
+  assert.ok(result.metadata.every((item) => !item.url.endsWith('/redirected')))
+  assert.deepEqual(strategy.intent, originalIntent)
+  assert.deepEqual(strategy.queryPlan, originalQueryPlan)
+})
+
+test('HTTP-first mixed batch 只把 partial/recoverable subset 交给 Reader 并按质量合并', async () => {
+  const urls = Array.from({ length: 10 }, (_, index) => `https://example.com/mixed-${index + 1}`)
+  let fallbackCandidateIds: string[] = []
+  let readerTargetCount = 0
+  let evaluatorEvidence: ResearchAgentEvidenceRecord[] = []
+  const result = await runResearchAgent(request, strategy, {
+    onReaderStarted: (count) => { readerTargetCount = count },
+  }, {
+    createToolExecutor: createMockToolExecutorFactory({
+      search: (queries) => makeSearchWithUrls(1, queries, urls),
+      http: (sources) => sources.map((source, index) => {
+        if (index === 1 || index === 7) {
+          return httpItem(source, 'partial', index === 7 ? {
+            extraction: { paragraphCount: 8, linkDensity: 0.01, confidence: 0.97 },
+            contentLength: 900,
+            content: 'strong HTTP partial '.repeat(50),
+          } : {})
+        }
+        if (index === 2) return httpItem(source, 'failed', { failureCode: 'TIMEOUT' })
+        if (index === 3) {
+          return httpItem(source, 'failed', { failureCode: 'UNSUPPORTED_CONTENT_TYPE' })
+        }
+        if (index === 4) {
+          return httpItem(source, 'failed', { failureCode: 'PRIVATE_ADDRESS_BLOCKED' })
+        }
+        if (index === 5) return httpItem(source, 'failed', { failureCode: 'REDIRECT_BLOCKED' })
+        return httpItem(source, 'full_text')
+      }),
+      read: async (sources) => {
+        fallbackCandidateIds = sources.map((source) => source.candidateId)
+        const batch = await readSearchMetadata(sources)
+        const unsupported = batch.evidenceSources[2]!
+        unsupported.evidenceType = 'search_summary'
+        unsupported.content = sources[2]!.snippet
+        const weaker = batch.evidenceSources[3]!
+        weaker.evidenceType = 'partial'
+        weaker.content = 'weak Reader partial'
+        batch.readerStats.fullTextCount = 2
+        batch.readerStats.partialCount = 1
+        batch.readerStats.failedCount = 1
+        batch.readerStats.searchSummaryCount = 1
+        return batch
+      },
+    }),
+    evaluate: async (input) => {
+      evaluatorEvidence = input.evidence
+      return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
+    },
+  })
+  assert.equal(readerTargetCount, 4)
+  assert.deepEqual(fallbackCandidateIds, [
+    'candidate-r1-2',
+    'candidate-r1-3',
+    'candidate-r1-4',
+    'candidate-r1-8',
+  ])
+  assert.ok(!result.metadata.some((item) => item.url === urls[4] || item.url === urls[5]))
+  assert.ok(evaluatorEvidence.every((item) => item.metadata.url === item.normalizedUrl))
+  const upgraded = evaluatorEvidence.find((item) => item.metadata.url === urls[1])!
+  assert.equal(upgraded.evidenceType, 'full_text')
+  assert.deepEqual(
+    new Set(upgraded.bindings.map((binding) => binding.acquisitionTool)),
+    new Set(['web_search', 'http_fetch', 'read_webpage']),
+  )
+  const timeoutUpgrade = evaluatorEvidence.find((item) => item.metadata.url === urls[2])!
+  assert.equal(timeoutUpgrade.evidenceType, 'full_text')
+  assert.deepEqual(
+    new Set(timeoutUpgrade.bindings.map((binding) => binding.acquisitionTool)),
+    new Set(['web_search', 'read_webpage']),
+  )
+  const unsupportedFallback = evaluatorEvidence.find((item) => item.metadata.url === urls[3])!
+  assert.equal(unsupportedFallback.evidenceType, 'search_summary')
+  assert.deepEqual(
+    new Set(unsupportedFallback.bindings.map((binding) => binding.acquisitionTool)),
+    new Set(['web_search']),
+  )
+  const preservedHttp = evaluatorEvidence.find((item) => item.metadata.url === urls[7])!
+  assert.equal(preservedHttp.evidenceType, 'partial')
+  assert.match(preservedHttp.content, /strong HTTP partial/)
+  assert.deepEqual(
+    new Set(preservedHttp.bindings.map((binding) => binding.acquisitionTool)),
+    new Set(['web_search', 'http_fetch', 'read_webpage']),
+  )
+  assert.equal(result.readerStats.attemptedCount, 4)
+  assert.equal(result.readerStats.fullTextCount, 2)
+  assert.equal(result.readerStats.partialCount, 1)
+  assert.equal(result.readerStats.failedCount, 1)
+  assert.equal(result.warnings.filter((warning) => warning.includes('搜索摘要')).length, 1)
+  assert.equal(result.warnings.filter((warning) => warning.includes('安全访问校验')).length, 1)
+  assert.ok(result.metadata.some((item) => item.url === urls[8]))
+  assert.ok(result.metadata.some((item) => item.url === urls[9]))
+})
+
+test('HTTP 和 Reader 均失败时保留 Search Summary 并继续 Evaluator', async () => {
+  let evaluatorCalls = 0
+  const result = await runResearchAgent(request, strategy, {}, {
+    createToolExecutor: createMockToolExecutorFactory({
+      search: (queries) => makeSearch(1, queries),
+      http: (sources) => sources.map((source) => httpItem(source, 'failed', {
+        failureCode: 'NETWORK_ERROR',
+      })),
+      read: async (sources) => ({
+        evidenceSources: sources.map((source, index) => ({
+          ...source,
+          sourceId: `source-${index + 1}`,
+          evidenceType: 'search_summary' as const,
+          content: source.snippet,
+        })),
+        readerStats: {
+          attemptedCount: sources.length,
+          fullTextCount: 0,
+          partialCount: 0,
+          insufficientCount: 0,
+          failedCount: sources.length,
+          searchSummaryCount: sources.length,
+          averageContentLength: 0,
+          failureCategories: {
+            HTTP_4XX: 0, HTTP_5XX: 0, TIMEOUT: 0, NETWORK: sources.length,
+            INVALID_RESPONSE: 0, EMPTY_CONTENT: 0, UNKNOWN: 0,
+          },
+          httpStatusCounts: {},
+        },
+        warnings: ['should not be exposed'],
+      }),
+    }),
+    evaluate: async (input) => {
+      evaluatorCalls += 1
+      assert.ok(input.evidence.every((item) => item.evidenceType === 'search_summary'))
+      return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
+    },
+  })
+  assert.equal(evaluatorCalls, 1)
+  assert.equal(result.evidenceSources.length, 2)
+  assert.equal(result.warnings.some((warning) => warning === 'should not be exposed'), false)
+  assert.equal(result.warnings.filter((warning) => warning.includes('搜索摘要')).length, 1)
+})
+
+test('HTTP security rejection 排除 Search Summary、禁止 Reader 且全排除返回 NO_REAL_SOURCES', async () => {
+  let readerCalls = 0
+  let evaluatorCalls = 0
+  await assert.rejects(
+    runResearchAgent(request, strategy, {}, {
+      createToolExecutor: createMockToolExecutorFactory({
+        search: (queries) => makeSearch(1, queries),
+        http: (sources) => sources.map((source, index) => httpItem(source, 'failed', {
+          failureCode: index === 0 ? 'PRIVATE_ADDRESS_BLOCKED' : 'REDIRECT_BLOCKED',
+        })),
+        read: async (sources) => {
+          readerCalls += 1
+          return readSearchMetadata(sources)
+        },
+      }),
+      evaluate: async () => {
+        evaluatorCalls += 1
+        return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
+      },
+    }),
+    (error) => error instanceof ResearchServiceError && error.code === 'NO_REAL_SOURCES',
+  )
+  assert.equal(readerCalls, 0)
+  assert.equal(evaluatorCalls, 0)
 })
 
 test('Agent insufficient 仅生成一次 Replan、执行第二轮并按 URL 合并 Evidence', async () => {
@@ -309,14 +580,14 @@ test('Agent insufficient 仅生成一次 Replan、执行第二轮并按 URL 合�
   assert.equal(checkpoints.filter((item) => item.phase === 'replanning').length, 1)
   assert.equal(checkpoints.at(-1)?.currentRound, 2)
   assert.equal(checkpoints.at(-1)?.replanCount, researchAgentTestApi.maxReplans)
-  assert.equal(checkpoints.at(-1)?.toolCallCount, 4)
+  assert.equal(checkpoints.at(-1)?.toolCallCount, 6)
   assert.deepEqual(checkpoints.at(-1)?.toolCallCounts, {
     web_search: 2,
     read_webpage: 2,
-    http_fetch: 0,
+    http_fetch: 2,
   })
   assert.equal(checkpoints.at(-1)?.currentTool, null)
-  assert.equal(checkpoints.at(-1)?.toolCallCounts?.http_fetch, 0)
+  assert.equal(checkpoints.at(-1)?.toolCallCounts?.http_fetch, 2)
   assert.ok(checkpoints.filter((item) => (
     item.phase === 'evaluating' || item.phase === 'replanning' || item.phase === 'completed'
   )).every((item) => item.currentTool === null))
@@ -444,6 +715,7 @@ test('Agent 执行异常进入 failed 且保留原始错误', async () => {
 
 test('Tool 完成后 request stale 时不进入 Reader 或 Evaluator', async () => {
   let stale = false
+  let httpCalls = 0
   let readerCalls = 0
   let evaluatorCalls = 0
   await assert.rejects(
@@ -457,6 +729,10 @@ test('Tool 完成后 request stale 时不进入 Reader 或 Evaluator', async () 
           stale = true
           return makeSearch(1, queries)
         },
+        http: async (sources) => {
+          httpCalls += 1
+          return sources.map((source) => httpItem(source))
+        },
         read: async (metadata) => {
           readerCalls += 1
           return readSearchMetadata(metadata)
@@ -469,7 +745,67 @@ test('Tool 完成后 request stale 时不进入 Reader 或 Evaluator', async () 
     }),
     StaleTaskWriteError,
   )
+  assert.equal(httpCalls, 0)
   assert.equal(readerCalls, 0)
+  assert.equal(evaluatorCalls, 0)
+})
+
+test('http_fetch 完成后 stale 时不进入 Reader 或 Evaluator', async () => {
+  let stale = false
+  let readerCalls = 0
+  let evaluatorCalls = 0
+  await assert.rejects(
+    runResearchAgent(request, strategy, {
+      assertCurrent: () => {
+        if (stale) throw new StaleTaskWriteError()
+      },
+    }, {
+      createToolExecutor: createMockToolExecutorFactory({
+        search: (queries) => makeSearch(1, queries),
+        http: async (sources) => {
+          stale = true
+          return sources.map((source) => httpItem(source, 'partial'))
+        },
+        read: async (sources) => {
+          readerCalls += 1
+          return readSearchMetadata(sources)
+        },
+      }),
+      evaluate: async () => {
+        evaluatorCalls += 1
+        return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
+      },
+    }),
+    StaleTaskWriteError,
+  )
+  assert.equal(readerCalls, 0)
+  assert.equal(evaluatorCalls, 0)
+})
+
+test('Reader 完成后 stale 时不进入 Evidence Evaluator', async () => {
+  let stale = false
+  let evaluatorCalls = 0
+  await assert.rejects(
+    runResearchAgent(request, strategy, {
+      assertCurrent: () => {
+        if (stale) throw new StaleTaskWriteError()
+      },
+    }, {
+      createToolExecutor: createMockToolExecutorFactory({
+        search: (queries) => makeSearch(1, queries),
+        read: async (sources) => {
+          const result = await readSearchMetadata(sources)
+          stale = true
+          return result
+        },
+      }),
+      evaluate: async () => {
+        evaluatorCalls += 1
+        return { status: 'sufficient', evidenceNeeds: [], followUpQueries: [] }
+      },
+    }),
+    StaleTaskWriteError,
+  )
   assert.equal(evaluatorCalls, 0)
 })
 
@@ -612,6 +948,13 @@ test('Agent v1 硬边界与 Tool Registry 固定且不写用户资料池', () =>
   assert.deepEqual(RESEARCH_AGENT_TOOL_REGISTRY, ['web_search', 'read_webpage', 'http_fetch'])
   const source = readFileSync('server/services/researchAgentService.ts', 'utf8')
   assert.doesNotMatch(source, /searchResearchSourcesWithGlm|enrichResearchSourcesWithGlm/)
-  assert.doesNotMatch(source, /tool:\s*['"]http_fetch['"]/)
+  assert.match(source, /tool:\s*['"]http_fetch['"]/)
   assert.doesNotMatch(source, /research_pool_items|addOwnedPoolItem/)
+  const apiSource = readFileSync('src/services/researchApi.ts', 'utf8')
+  const contextSource = readFileSync('src/context/ResearchContext.tsx', 'utf8')
+  const pageSource = readFileSync('src/pages/SearchResultsPage.tsx', 'utf8')
+  assert.match(apiSource, /'http_fetch'/)
+  assert.match(contextSource, /agent\.currentTool === 'http_fetch'/)
+  assert.match(pageSource, /正在获取网页内容/)
+  assert.doesNotMatch(pageSource, /fallbackSources|executionId|failureCode/)
 })

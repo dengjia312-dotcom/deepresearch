@@ -606,7 +606,7 @@ function item(
   return {
     candidateId: 'candidate-1',
     status,
-    finalUrl: 'https://public.example/article',
+    finalUrl: 'https://canonical.example/redirected-article',
     title: 'HTTP 标题',
     content: 'HTTP evidence '.repeat(Math.ceil(contentLength / 14)).slice(0, contentLength),
     contentLength,
@@ -658,6 +658,8 @@ test('HTTP Evidence 升级 search_summary，按质量合并并保留 multiple To
     agentRound: 1,
     acquisitionTool: 'web_search',
   }], 'ignored-id')!
+  assert.equal(http.evidence.metadata.url, source().url)
+  assert.notEqual(http.evidence.metadata.url, item('partial', 0.8, 800).finalUrl)
   assert.ok(http.evidence.bindings.every((binding) => binding.acquisitionTool === 'http_fetch'))
   const upgraded = mergeResearchEvidenceCandidates(searchSummary, http)
   assert.equal(upgraded.evidence.evidenceType, 'partial')
@@ -681,6 +683,20 @@ test('HTTP Evidence 升级 search_summary，按质量合并并保留 multiple To
     queryId: 'query-3', agentRound: 2, acquisitionTool: 'web_search',
   }], 'evidence-http-strong')!
   assert.match(mergeResearchEvidenceCandidates(readerCandidate(), strongerHttp).evidence.content, /HTTP evidence/)
+  const weakerReader = readerCandidate()
+  weakerReader.evidence.content = 'weaker Reader content'
+  weakerReader.quality = {
+    confidence: 0.6,
+    effectiveLength: 500,
+    paragraphCount: 2,
+    linkDensity: 0.1,
+  }
+  const preservedHttp = mergeResearchEvidenceCandidates(strongerHttp, weakerReader)
+  assert.match(preservedHttp.evidence.content, /HTTP evidence/)
+  assert.deepEqual(
+    new Set(preservedHttp.evidence.bindings.map((binding) => binding.acquisitionTool)),
+    new Set(['http_fetch', 'read_webpage']),
+  )
   const readerUpgrade = mergeResearchEvidenceCandidates(weakerEqualType, readerCandidate())
   assert.equal(readerUpgrade.evidence.content, 'Reader stronger content')
   assert.equal(readerUpgrade.evidence.evidenceId, weakerEqualType.evidence.evidenceId)
