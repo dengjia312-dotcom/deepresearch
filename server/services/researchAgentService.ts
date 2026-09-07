@@ -48,6 +48,7 @@ export const RESEARCH_AGENT_TOOL_REGISTRY = Object.freeze(
 )
 const MAX_SYNTHESIS_EVIDENCE = 16
 const MAX_ROUND_ACQUISITION_SOURCES = 8
+const REPLAN_UNAVAILABLE_WARNING = '部分证据仍有补充空间，已基于当前可用资料完成研究。'
 const HTTP_SECURITY_FAILURES = new Set<HttpFetchFailureCode>([
   'UNSAFE_URL',
   'UNSUPPORTED_PROTOCOL',
@@ -623,30 +624,44 @@ export async function runResearchAgent(
         0,
         RESEARCH_AGENT_MAX_FOLLOW_UP_QUERIES,
       )
-      await persistCheckpoint({
-        phase: 'replanning',
-        currentTool: null,
-        evaluationStatus: 'insufficient',
-        evidenceNeeds: firstEvaluation.evidenceNeeds,
-        followUpQueries,
-        replanCount: 1,
-      })
-      await hooks.assertCurrent?.()
-      const secondEvaluation = await executeRound(
-        2,
-        followUpQueries,
-        firstEvaluation.evidenceNeeds,
-      )
-      if (secondEvaluation.status === 'insufficient') {
-        warnings.push('补充研究已达到两轮上限，仍存在部分证据缺口；报告将基于当前最佳证据生成。')
+      const replanAvailable = (firstEvaluation.replanAvailable ?? true)
+        && firstEvaluation.evidenceNeeds.length > 0
+        && followUpQueries.length > 0
+      if (!replanAvailable) {
+        warnings.push(REPLAN_UNAVAILABLE_WARNING)
+        await persistCheckpoint({
+          phase: 'completed',
+          currentTool: null,
+          evaluationStatus: 'insufficient',
+          evidenceNeeds: firstEvaluation.evidenceNeeds,
+          followUpQueries: [],
+        })
+      } else {
+        await persistCheckpoint({
+          phase: 'replanning',
+          currentTool: null,
+          evaluationStatus: 'insufficient',
+          evidenceNeeds: firstEvaluation.evidenceNeeds,
+          followUpQueries,
+          replanCount: 1,
+        })
+        await hooks.assertCurrent?.()
+        const secondEvaluation = await executeRound(
+          2,
+          followUpQueries,
+          firstEvaluation.evidenceNeeds,
+        )
+        if (secondEvaluation.status === 'insufficient') {
+          warnings.push('补充研究已达到两轮上限，仍存在部分证据缺口；报告将基于当前最佳证据生成。')
+        }
+        await persistCheckpoint({
+          phase: 'completed',
+          currentTool: null,
+          evaluationStatus: secondEvaluation.status,
+          evidenceNeeds: secondEvaluation.evidenceNeeds,
+          followUpQueries,
+        })
       }
-      await persistCheckpoint({
-        phase: 'completed',
-        currentTool: null,
-        evaluationStatus: secondEvaluation.status,
-        evidenceNeeds: secondEvaluation.evidenceNeeds,
-        followUpQueries,
-      })
     }
     if (searchSummaryFallbackUrls.size > 0) {
       warnings.push(

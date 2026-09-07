@@ -285,6 +285,7 @@ export interface ResearchEvidenceEvaluation {
   status: 'sufficient' | 'insufficient'
   evidenceNeeds: ResearchEvidenceNeed[]
   followUpQueries: ResearchFollowUpQuery[]
+  replanAvailable?: boolean
 }
 
 export interface ResearchAgentCheckpoint {

@@ -19,6 +19,18 @@ const QUERY_MAX_LENGTH = 160
 const PURPOSE_MAX_LENGTH = 80
 const URL_OR_DOMAIN_PATTERN = /\bsite\s*:|https?:\/\/|www\.|(?:[a-z0-9-]+\.)+(?:com|cn|org|net|edu|gov|io|ai)\b/i
 
+type ReplanRejectedReason =
+  | 'invalid_need'
+  | 'invalid_query'
+  | 'invalid_purpose'
+  | 'url_or_domain'
+  | 'excluded_meaning'
+  | 'canonical_boundary'
+  | 'duplicate'
+  | 'invalid_binding'
+
+type ReplanRejectedReasonCounts = Partial<Record<ReplanRejectedReason, number>>
+
 export interface ResearchEvidenceEvaluatorInput {
   intent: ResearchIntent
   plan: ResearchPlanContext
@@ -39,6 +51,13 @@ function uniqueStrings(value: unknown, maximum: number, maxLength: number) {
 
 function normalizeQueryText(value: string) {
   return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase()
+}
+
+function incrementRejectedReason(
+  counts: ReplanRejectedReasonCounts,
+  reason: ReplanRejectedReason,
+) {
+  counts[reason] = (counts[reason] ?? 0) + 1
 }
 
 function hasExcludedMeaning(query: string, intent: ResearchIntent) {
@@ -66,7 +85,11 @@ function parseEvidenceNeeds(
   input: ResearchEvidenceEvaluatorInput,
   finalStatus: ResearchEvidenceEvaluation['status'],
 ) {
-  if (!Array.isArray(value)) return { needs: [], idMap: new Map<string, string>() }
+  const rejectedReasonCounts: ReplanRejectedReasonCounts = {}
+  if (!Array.isArray(value)) {
+    incrementRejectedReason(rejectedReasonCounts, 'invalid_need')
+    return { needs: [], idMap: new Map<string, string>(), rejectedReasonCounts }
+  }
   const allowedEvidenceIds = new Set(input.evidence.map((item) => item.evidenceId))
   const allowedQuestionIds = new Set(input.plan.questions.map((question) => question.id))
   const idMap = new Map<string, string>()
@@ -75,11 +98,17 @@ function parseEvidenceNeeds(
   const needs: ResearchEvidenceNeed[] = []
   for (const item of value) {
     if (needs.length >= MAX_EVIDENCE_NEEDS) break
-    if (!isRecord(item)) continue
+    if (!isRecord(item)) {
+      incrementRejectedReason(rejectedReasonCounts, 'invalid_need')
+      continue
+    }
     const rawId = asString(item.id).trim()
     const label = asString(item.label).trim()
     const description = asString(item.description).trim()
-    if (!rawId || !label || label.length > 100 || !description || description.length > 400) continue
+    if (!rawId || !label || label.length > 100 || !description || description.length > 400) {
+      incrementRejectedReason(rejectedReasonCounts, 'invalid_need')
+      continue
+    }
     let id = priorIds.has(rawId) ? rawId : ''
     if (!id) {
       let sequence = needs.length + 1
@@ -88,7 +117,10 @@ function parseEvidenceNeeds(
         sequence += 1
       } while (usedIds.has(id))
     }
-    if (usedIds.has(id)) continue
+    if (usedIds.has(id)) {
+      incrementRejectedReason(rejectedReasonCounts, 'invalid_need')
+      continue
+    }
     usedIds.add(id)
     idMap.set(rawId, id)
     const supportingEvidenceIds = uniqueStrings(item.supportingEvidenceIds, 16, 100)
@@ -105,7 +137,7 @@ function parseEvidenceNeeds(
       supportingEvidenceIds,
     })
   }
-  return { needs, idMap }
+  return { needs, idMap, rejectedReasonCounts }
 }
 
 function parseFollowUpQueries(
@@ -113,13 +145,21 @@ function parseFollowUpQueries(
   input: ResearchEvidenceEvaluatorInput,
   needIdMap: Map<string, string>,
 ) {
-  if (!input.allowReplan || !Array.isArray(value)) return []
+  const rejectedReasonCounts: ReplanRejectedReasonCounts = {}
+  if (!input.allowReplan) return { queries: [], rejectedReasonCounts }
+  if (!Array.isArray(value)) {
+    incrementRejectedReason(rejectedReasonCounts, 'invalid_query')
+    return { queries: [], rejectedReasonCounts }
+  }
   const executed = new Set(input.executedQueries.map((item) => normalizeQueryText(item.query)))
   const purposes = new Set<string>()
   const queries: ResearchFollowUpQuery[] = []
   for (const item of value) {
     if (queries.length >= MAX_FOLLOW_UP_QUERIES) break
-    if (!isRecord(item)) continue
+    if (!isRecord(item)) {
+      incrementRejectedReason(rejectedReasonCounts, 'invalid_query')
+      continue
+    }
     const query = asString(item.query).trim().replace(/\s+/g, ' ')
     const purpose = asString(item.purpose).trim()
     const normalized = normalizeQueryText(query)
@@ -129,16 +169,18 @@ function parseFollowUpQueries(
         const mapped = needIdMap.get(needId)
         return mapped ? [mapped] : []
       })
-    if (
-      !query || query.length > QUERY_MAX_LENGTH
-      || !purpose || purpose.length > PURPOSE_MAX_LENGTH
-      || URL_OR_DOMAIN_PATTERN.test(query)
-      || hasExcludedMeaning(query, input.intent)
-      || !remainsWithinCanonicalIntent(query, input.intent)
-      || executed.has(normalized)
-      || purposes.has(normalizedPurpose)
-      || evidenceNeedIds.length === 0
-    ) continue
+    let rejectedReason: ReplanRejectedReason | null = null
+    if (!query || query.length > QUERY_MAX_LENGTH) rejectedReason = 'invalid_query'
+    else if (!purpose || purpose.length > PURPOSE_MAX_LENGTH) rejectedReason = 'invalid_purpose'
+    else if (URL_OR_DOMAIN_PATTERN.test(query)) rejectedReason = 'url_or_domain'
+    else if (hasExcludedMeaning(query, input.intent)) rejectedReason = 'excluded_meaning'
+    else if (!remainsWithinCanonicalIntent(query, input.intent)) rejectedReason = 'canonical_boundary'
+    else if (executed.has(normalized) || purposes.has(normalizedPurpose)) rejectedReason = 'duplicate'
+    else if (evidenceNeedIds.length === 0) rejectedReason = 'invalid_binding'
+    if (rejectedReason) {
+      incrementRejectedReason(rejectedReasonCounts, rejectedReason)
+      continue
+    }
     executed.add(normalized)
     purposes.add(normalizedPurpose)
     queries.push({
@@ -150,7 +192,7 @@ function parseFollowUpQueries(
       evidenceNeedIds: [...new Set(evidenceNeedIds)],
     })
   }
-  return queries
+  return { queries, rejectedReasonCounts }
 }
 
 function buildEvaluatorPrompt(input: ResearchEvidenceEvaluatorInput, forceInsufficient: boolean) {
@@ -217,26 +259,43 @@ export async function evaluateResearchEvidence(
   const status: ResearchEvidenceEvaluation['status'] = forceInsufficient
     ? 'insufficient'
     : modelStatus
-  let { needs, idMap } = parseEvidenceNeeds(parsed.evidenceNeeds, input, status)
+  let {
+    needs,
+    idMap,
+    rejectedReasonCounts: needRejectedReasonCounts,
+  } = parseEvidenceNeeds(parsed.evidenceNeeds, input, status)
   if (status === 'sufficient' && needs.length === 0 && input.priorEvidenceNeeds?.length) {
     needs = input.priorEvidenceNeeds.map((need) => ({ ...need, status: 'satisfied' }))
     idMap = new Map(needs.map((need) => [need.id, need.id]))
   }
-  const followUpQueries = status === 'insufficient'
+  const followUpResult = status === 'insufficient'
     ? parseFollowUpQueries(parsed.followUpQueries, input, idMap)
-    : []
-  if (
-    status === 'insufficient'
-    && (
-      needs.length === 0
-      || (input.allowReplan && followUpQueries.length === 0)
-    )
-  ) {
-    throw new ResearchServiceError(
-      'AI_GENERATION_RESPONSE_INVALID',
-      502,
-      'AI 返回的证据缺口或补充检索计划无效，请重新发起研究。',
-    )
+    : { queries: [], rejectedReasonCounts: {} }
+  const followUpQueries = followUpResult.queries
+  const rejectedReasonCounts = {
+    ...needRejectedReasonCounts,
+    ...followUpResult.rejectedReasonCounts,
+  }
+  const replanAvailable = status === 'insufficient'
+    && input.allowReplan
+    && needs.length > 0
+    && followUpQueries.length > 0
+  if (status === 'insufficient' && input.allowReplan && !replanAvailable) {
+    const evidenceTypeCounts = input.evidence.reduce((counts, item) => {
+      counts[item.evidenceType] += 1
+      return counts
+    }, { full_text: 0, partial: 0, search_summary: 0 })
+    console.warn('[research:agent] replan-unavailable', {
+      round: input.round,
+      status,
+      validEvidenceNeedCount: needs.length,
+      validFollowUpQueryCount: followUpQueries.length,
+      rejectedReasonCounts,
+      evidenceCount: input.evidence.length,
+      fullTextCount: evidenceTypeCounts.full_text,
+      partialCount: evidenceTypeCounts.partial,
+      searchSummaryCount: evidenceTypeCounts.search_summary,
+    })
   }
   console.info('[research:agent] evidence-evaluated', {
     round: input.round,
@@ -245,7 +304,7 @@ export async function evaluateResearchEvidence(
     evidenceNeedCount: needs.length,
     followUpQueryCount: followUpQueries.length,
   })
-  return { status, evidenceNeeds: needs, followUpQueries }
+  return { status, evidenceNeeds: needs, followUpQueries, replanAvailable }
 }
 
 export const researchEvidenceEvaluatorTestApi = {

@@ -11,6 +11,7 @@ import {
   evaluateResearchEvidence,
   researchEvidenceEvaluatorTestApi,
 } from '../server/services/researchEvidenceEvaluatorService'
+import { researchWithProviders } from '../server/services/researchService'
 import type {
   ResearchAgentCheckpoint,
   ResearchAgentEvidenceRecord,
@@ -90,6 +91,58 @@ const request: ResearchRequest = {
     ],
     sourcePreferences: ['权威报告'],
   },
+}
+
+const replanUnavailableWarning = '部分证据仍有补充空间，已基于当前可用资料完成研究。'
+
+function makeEvaluatorEvidence(
+  evidenceTypes: ResearchAgentEvidenceRecord['evidenceType'][] = [
+    'full_text', 'full_text', 'full_text', 'full_text', 'full_text',
+    'search_summary', 'search_summary', 'search_summary',
+  ],
+) {
+  return evidenceTypes.map<ResearchAgentEvidenceRecord>((evidenceType, index) => ({
+    evidenceId: `evidence-${index + 1}`,
+    normalizedUrl: `https://example.com/evidence-${index + 1}`,
+    metadata: {
+      url: `https://example.com/evidence-${index + 1}`,
+      title: `来源 ${index + 1}`,
+      publisher: '研究机构',
+      publishedAt: '2026-09-01',
+      snippet: `摘要 ${index + 1}`,
+    },
+    evidenceType,
+    content: evidenceType === 'search_summary' ? `摘要 ${index + 1}` : `正文证据 ${index + 1}`,
+    sourceType: 'professional',
+    bindings: [{ queryId: 'query-1', agentRound: 1, acquisitionTool: 'web_search' }],
+  }))
+}
+
+function qwenEvaluatorResponse(payload: unknown) {
+  return new Response(JSON.stringify({
+    choices: [{ message: { content: typeof payload === 'string' ? payload : JSON.stringify(payload) } }],
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+}
+
+async function withMockQwenFetch<T>(
+  fetchImplementation: typeof fetch,
+  action: () => Promise<T>,
+) {
+  const originalFetch = globalThis.fetch
+  const oldKey = process.env.QWEN_API_KEY
+  const oldBase = process.env.QWEN_BASE_URL
+  process.env.QWEN_API_KEY = 'test-key'
+  process.env.QWEN_BASE_URL = 'https://qwen.test/v1'
+  globalThis.fetch = fetchImplementation
+  try {
+    return await action()
+  } finally {
+    globalThis.fetch = originalFetch
+    if (oldKey === undefined) delete process.env.QWEN_API_KEY
+    else process.env.QWEN_API_KEY = oldKey
+    if (oldBase === undefined) delete process.env.QWEN_BASE_URL
+    else process.env.QWEN_BASE_URL = oldBase
+  }
 }
 
 function makeSearch(round: number, queries: SearchQuery[]) {
@@ -621,6 +674,77 @@ test('Agent insufficient 仅生成一次 Replan、执行第二轮并按 URL 合�
   )))
 })
 
+test('Agent insufficient 且没有 Follow-up 时跳过 Round 2 并保留当前 Evidence', async () => {
+  let searchCount = 0
+  let evaluationCount = 0
+  const checkpoints: ResearchAgentCheckpoint[] = []
+  const result = await runResearchAgent(request, strategy, {
+    onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
+  }, {
+    createToolExecutor: createMockToolExecutorFactory({
+      search: (queries) => {
+        searchCount += 1
+        return makeSearch(searchCount, queries)
+      },
+    }),
+    evaluate: async () => {
+      evaluationCount += 1
+      return {
+        status: 'insufficient',
+        evidenceNeeds: [{
+          id: 'need-1', label: '补充数据', description: '仍可补充数据',
+          relatedQuestionIds: [], status: 'open', supportingEvidenceIds: [],
+        }],
+        followUpQueries: [],
+        replanAvailable: false,
+      }
+    },
+  })
+  assert.equal(searchCount, 1)
+  assert.equal(evaluationCount, 1)
+  assert.ok(result.evidenceSources.length > 0)
+  assert.deepEqual(result.warnings, [replanUnavailableWarning])
+  assert.equal(checkpoints.some((checkpoint) => checkpoint.phase === 'replanning'), false)
+  assert.equal(checkpoints.at(-1)?.phase, 'completed')
+  assert.equal(checkpoints.at(-1)?.currentRound, 1)
+  assert.equal(checkpoints.at(-1)?.replanCount, 0)
+  assert.equal(checkpoints.at(-1)?.evaluationStatus, 'insufficient')
+  assert.deepEqual(checkpoints.at(-1)?.followUpQueries, [])
+  assert.deepEqual(checkpoints.at(-1)?.toolCallCounts, {
+    web_search: 1,
+    read_webpage: 1,
+    http_fetch: 1,
+  })
+})
+
+test('Agent insufficient 且没有有效 Need 时跳过 Round 2', async () => {
+  let searchCount = 0
+  const checkpoints: ResearchAgentCheckpoint[] = []
+  const result = await runResearchAgent(request, strategy, {
+    onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
+  }, {
+    createToolExecutor: createMockToolExecutorFactory({
+      search: (queries) => {
+        searchCount += 1
+        return makeSearch(searchCount, queries)
+      },
+    }),
+    evaluate: async () => ({
+      status: 'insufficient',
+      evidenceNeeds: [],
+      followUpQueries: [],
+      replanAvailable: false,
+    }),
+  })
+  assert.equal(searchCount, 1)
+  assert.ok(result.evidenceSources.length > 0)
+  assert.equal(result.warnings.filter((warning) => warning === replanUnavailableWarning).length, 1)
+  assert.equal(checkpoints.some((checkpoint) => checkpoint.phase === 'replanning'), false)
+  assert.equal(checkpoints.at(-1)?.phase, 'completed')
+  assert.equal(checkpoints.at(-1)?.replanCount, 0)
+  assert.deepEqual(checkpoints.at(-1)?.evidenceNeeds, [])
+})
+
 test('Agent 第二轮仍 insufficient 时强制结束，不执行第三轮', async () => {
   let searchCount = 0
   let evaluationCount = 0
@@ -877,6 +1001,450 @@ test('Evidence Evaluator 限制 Follow-up 数量、去重并拒绝 URL/排除含
     else process.env.QWEN_API_KEY = oldKey
     if (oldBase === undefined) delete process.env.QWEN_BASE_URL
     else process.env.QWEN_BASE_URL = oldBase
+  }
+})
+
+const unavailableGuardrailCases = [
+  {
+    name: 'duplicate',
+    query: initialQueries[0]!.query,
+    evidenceNeedIds: ['raw-need'],
+    reason: 'duplicate',
+  },
+  {
+    name: 'canonical boundary',
+    query: '量子物理 粒子统计',
+    evidenceNeedIds: ['raw-need'],
+    reason: 'canonical_boundary',
+  },
+  {
+    name: 'excluded meaning',
+    query: '污染治理 环境科学 数据',
+    evidenceNeedIds: ['raw-need'],
+    reason: 'excluded_meaning',
+  },
+  {
+    name: 'URL/domain',
+    query: 'https://bad.example.com 环境设计',
+    evidenceNeedIds: ['raw-need'],
+    reason: 'url_or_domain',
+  },
+  {
+    name: 'invalid binding',
+    query: '环境设计 招聘 能力数据',
+    evidenceNeedIds: ['unknown-need'],
+    reason: 'invalid_binding',
+  },
+] as const
+
+for (const guardrailCase of unavailableGuardrailCases) {
+  test(`Evaluator 所有 Follow-up 因 ${guardrailCase.name} 被过滤时返回 replan unavailable`, async () => {
+    const warningLogs: unknown[][] = []
+    const originalWarn = console.warn
+    console.warn = (...values: unknown[]) => { warningLogs.push(values) }
+    try {
+      const result = await withMockQwenFetch(
+        async () => qwenEvaluatorResponse({
+          status: 'insufficient',
+          evidenceNeeds: [{
+            id: 'raw-need',
+            label: '补充证据',
+            description: '不应出现在诊断日志中的原始缺口正文',
+            relatedQuestionIds: ['question-1'],
+            supportingEvidenceIds: ['evidence-1'],
+          }],
+          followUpQueries: [{
+            query: guardrailCase.query,
+            purpose: '补充目的',
+            evidenceNeedIds: guardrailCase.evidenceNeedIds,
+          }],
+        }),
+        () => evaluateResearchEvidence({
+          intent: strategy.intent,
+          plan: request.researchPlanContext!,
+          initialQueries,
+          executedQueries: initialQueries,
+          evidence: makeEvaluatorEvidence(),
+          round: 1,
+          allowReplan: true,
+        }),
+      )
+      assert.equal(result.status, 'insufficient')
+      assert.equal(result.replanAvailable, false)
+      assert.equal(result.evidenceNeeds.length, 1)
+      assert.deepEqual(result.followUpQueries, [])
+
+      const diagnostic = warningLogs.find(
+        ([message]) => message === '[research:agent] replan-unavailable',
+      )
+      assert.ok(diagnostic)
+      const metadata = diagnostic[1] as Record<string, unknown>
+      assert.deepEqual(Object.keys(metadata), [
+        'round',
+        'status',
+        'validEvidenceNeedCount',
+        'validFollowUpQueryCount',
+        'rejectedReasonCounts',
+        'evidenceCount',
+        'fullTextCount',
+        'partialCount',
+        'searchSummaryCount',
+      ])
+      assert.deepEqual(metadata.rejectedReasonCounts, { [guardrailCase.reason]: 1 })
+      assert.equal(metadata.evidenceCount, 8)
+      assert.equal(metadata.fullTextCount, 5)
+      assert.equal(metadata.partialCount, 0)
+      assert.equal(metadata.searchSummaryCount, 3)
+      assert.doesNotMatch(
+        JSON.stringify(diagnostic),
+        /bad\.example|量子物理|污染治理|环境设计专业 就业趋势|招聘 能力数据|原始缺口正文|evidence-1/,
+      )
+
+      let searchCount = 0
+      const checkpoints: ResearchAgentCheckpoint[] = []
+      const agentResult = await runResearchAgent(request, strategy, {
+        onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
+      }, {
+        createToolExecutor: createMockToolExecutorFactory({
+          search: (queries) => {
+            searchCount += 1
+            return makeSearch(searchCount, queries)
+          },
+        }),
+        evaluate: async () => result,
+      })
+      assert.equal(searchCount, 1)
+      assert.equal(agentResult.warnings.filter(
+        (warning) => warning === replanUnavailableWarning,
+      ).length, 1)
+      assert.equal(checkpoints.some((checkpoint) => checkpoint.phase === 'replanning'), false)
+      assert.equal(checkpoints.at(-1)?.replanCount, 0)
+    } finally {
+      console.warn = originalWarn
+    }
+  })
+}
+
+test('Evaluator 没有有效 Need 时返回 replan unavailable 并记录脱敏计数', async () => {
+  const warningLogs: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...values: unknown[]) => { warningLogs.push(values) }
+  try {
+    const result = await withMockQwenFetch(
+      async () => qwenEvaluatorResponse({
+        status: 'insufficient',
+        evidenceNeeds: [{ id: '', label: '缺口', description: '无效 Need' }],
+        followUpQueries: [{
+          query: '环境设计 招聘 数据',
+          purpose: '补充目的',
+          evidenceNeedIds: ['missing-need'],
+        }],
+      }),
+      () => evaluateResearchEvidence({
+        intent: strategy.intent,
+        plan: request.researchPlanContext!,
+        initialQueries,
+        executedQueries: initialQueries,
+        evidence: makeEvaluatorEvidence(),
+        round: 1,
+        allowReplan: true,
+      }),
+    )
+    assert.equal(result.replanAvailable, false)
+    assert.deepEqual(result.evidenceNeeds, [])
+    assert.deepEqual(result.followUpQueries, [])
+    const diagnostic = warningLogs.find(
+      ([message]) => message === '[research:agent] replan-unavailable',
+    )
+    assert.ok(diagnostic)
+    assert.deepEqual((diagnostic[1] as Record<string, unknown>).rejectedReasonCounts, {
+      invalid_need: 1,
+      invalid_binding: 1,
+    })
+  } finally {
+    console.warn = originalWarn
+  }
+})
+
+test('Evaluator 部分 Query 无效且至少一条有效时只用有效 Query 进入 Round 2', async () => {
+  const searched: SearchQuery[][] = []
+  await withMockQwenFetch(
+    async () => qwenEvaluatorResponse({
+      status: 'insufficient',
+      evidenceNeeds: [{
+        id: 'raw-need', label: '招聘证据', description: '仍需招聘数据',
+        relatedQuestionIds: ['question-1'], supportingEvidenceIds: [],
+      }],
+      followUpQueries: [
+        { query: 'https://bad.example.com', purpose: '无效链接', evidenceNeedIds: ['raw-need'] },
+        { query: '环境设计 招聘 能力数据', purpose: '有效补充', evidenceNeedIds: ['raw-need'] },
+      ],
+    }),
+    async () => {
+      const result = await runResearchAgent(request, strategy, {}, {
+        createToolExecutor: createMockToolExecutorFactory({
+          search: (queries) => {
+            searched.push(queries)
+            return makeSearch(searched.length, queries)
+          },
+        }),
+      })
+      assert.equal(searched.length, 2)
+      assert.equal(searched[1]?.length, 1)
+      assert.equal(searched[1]?.[0]?.query, '环境设计 招聘 能力数据')
+      assert.equal(result.warnings.filter((warning) => warning.includes('两轮上限')).length, 1)
+      assert.equal(result.warnings.includes(replanUnavailableWarning), false)
+    },
+  )
+})
+
+test('Evaluator JSON、status 与 Provider fatal boundary 保持不变', async () => {
+  const input = {
+    intent: strategy.intent,
+    plan: request.researchPlanContext!,
+    initialQueries,
+    executedQueries: initialQueries,
+    evidence: makeEvaluatorEvidence(),
+    round: 1 as const,
+    allowReplan: true,
+  }
+  await assert.rejects(
+    withMockQwenFetch(
+      async () => qwenEvaluatorResponse('not-json'),
+      () => evaluateResearchEvidence(input),
+    ),
+    (error) => error instanceof ResearchServiceError
+      && error.code === 'AI_GENERATION_RESPONSE_INVALID'
+      && error.diagnosticCode === 'QWEN_JSON_INVALID',
+  )
+  await assert.rejects(
+    withMockQwenFetch(
+      async () => qwenEvaluatorResponse({
+        status: 'unknown', evidenceNeeds: [], followUpQueries: [],
+      }),
+      () => evaluateResearchEvidence(input),
+    ),
+    (error) => error instanceof ResearchServiceError
+      && error.code === 'AI_GENERATION_RESPONSE_INVALID'
+      && error.publicMessage.includes('证据完整性评估无效'),
+  )
+  await assert.rejects(
+    withMockQwenFetch(
+      async () => { throw new Error('provider unavailable') },
+      () => evaluateResearchEvidence(input),
+    ),
+    (error) => error instanceof ResearchServiceError
+      && error.code === 'AI_GENERATION_FAILED',
+  )
+})
+
+test('“游戏对人的影响”5 full_text + 3 summary 且 Replan 无效时完成当前轮', async () => {
+  const gameQueries: SearchQuery[] = [
+    { id: 'game-query-1', query: '电子游戏 心理健康 影响', purpose: '心理影响', priority: 1 },
+    { id: 'game-query-2', query: '电子游戏 认知发展 影响', purpose: '认知影响', priority: 2 },
+    { id: 'game-query-3', query: '电子游戏 社会行为 影响', purpose: '社会影响', priority: 3 },
+  ]
+  const gameStrategy: ResearchStrategy = {
+    ...strategy,
+    intent: {
+      normalizedTopic: '游戏对人的影响',
+      researchObject: '电子游戏参与者',
+      userIntent: '分析游戏对人的多维影响',
+      scope: ['电子游戏', '心理健康', '认知发展', '社会行为'],
+      excludedMeanings: [],
+      keyConcepts: ['电子游戏', '游戏影响'],
+      ambiguityDetected: false,
+    },
+    queryPlan: { queries: gameQueries },
+  }
+  const gameRequest: ResearchRequest = {
+    ...request,
+    topic: '游戏对人的影响',
+    goal: gameStrategy.intent.userIntent,
+    researchStrategy: gameStrategy,
+    researchPlanContext: {
+      objective: gameStrategy.intent.userIntent,
+      scope: gameStrategy.intent.scope.join('；'),
+      questions: gameQueries.map((query, index) => ({ id: `game-question-${index + 1}`, text: query.purpose })),
+      sourcePreferences: [],
+    },
+  }
+  const urls = Array.from({ length: 8 }, (_, index) => `https://example.com/game-${index + 1}`)
+  const searched: SearchQuery[][] = []
+  const checkpoints: ResearchAgentCheckpoint[] = []
+  await withMockQwenFetch(
+    async () => qwenEvaluatorResponse({
+      status: 'insufficient',
+      evidenceNeeds: [],
+      followUpQueries: [],
+    }),
+    async () => {
+      const result = await runResearchAgent(gameRequest, gameStrategy, {
+        onCheckpoint: (checkpoint) => { checkpoints.push(checkpoint) },
+      }, {
+        createToolExecutor: createMockToolExecutorFactory({
+          search: (queries) => {
+            searched.push(queries)
+            return makeSearchWithUrls(1, queries, urls)
+          },
+          http: (sources) => sources.map((source, index) => (
+            index < 5
+              ? httpItem(source, 'full_text')
+              : httpItem(source, 'failed', { failureCode: 'EMPTY_CONTENT' })
+          )),
+          read: async (sources) => ({
+            evidenceSources: sources.map((source, index) => ({
+              ...source,
+              sourceId: `source-${index + 1}`,
+              evidenceType: 'search_summary' as const,
+              content: source.snippet,
+            })),
+            readerStats: {
+              attemptedCount: sources.length,
+              fullTextCount: 0,
+              partialCount: 0,
+              insufficientCount: 0,
+              failedCount: sources.length,
+              searchSummaryCount: sources.length,
+              averageContentLength: 0,
+              failureCategories: {
+                HTTP_4XX: 0, HTTP_5XX: 0, TIMEOUT: 0, NETWORK: 0,
+                INVALID_RESPONSE: 0, EMPTY_CONTENT: sources.length, UNKNOWN: 0,
+              },
+              httpStatusCounts: {},
+            },
+            warnings: [],
+          }),
+        }),
+      })
+      assert.equal(searched.length, 1)
+      assert.equal(result.evidenceSources.filter((item) => item.evidenceType === 'full_text').length, 5)
+      assert.equal(result.evidenceSources.filter((item) => item.evidenceType === 'search_summary').length, 3)
+      assert.equal(result.warnings.filter((warning) => warning === replanUnavailableWarning).length, 1)
+      assert.equal(checkpoints.some((checkpoint) => checkpoint.phase === 'replanning'), false)
+      assert.equal(checkpoints.at(-1)?.phase, 'completed')
+      assert.equal(checkpoints.at(-1)?.currentRound, 1)
+      assert.equal(checkpoints.at(-1)?.replanCount, 0)
+      assert.deepEqual(checkpoints.at(-1)?.toolCallCounts, {
+        web_search: 1,
+        read_webpage: 1,
+        http_fetch: 1,
+      })
+    },
+  )
+})
+
+test('Replan unavailable 后完整 Research 链路只执行一次 Synthesis', async () => {
+  const originalFetch = globalThis.fetch
+  const environment = {
+    GLM_API_KEY: process.env.GLM_API_KEY,
+    GLM_BASE_URL: process.env.GLM_BASE_URL,
+    QWEN_API_KEY: process.env.QWEN_API_KEY,
+    QWEN_BASE_URL: process.env.QWEN_BASE_URL,
+  }
+  let searchCallCount = 0
+  let evaluatorCallCount = 0
+  let synthesisCallCount = 0
+  let synthesisStartedCount = 0
+  process.env.GLM_API_KEY = 'test-glm-key'
+  process.env.GLM_BASE_URL = 'https://glm.test/api/paas/v4'
+  process.env.QWEN_API_KEY = 'test-qwen-key'
+  process.env.QWEN_BASE_URL = 'https://qwen.test/v1'
+  globalThis.fetch = async (input, init) => {
+    const url = String(input)
+    if (url.endsWith('/web_search')) {
+      searchCallCount += 1
+      return new Response(JSON.stringify({
+        search_result: Array.from({ length: 6 }, (_, index) => ({
+          title: `电子游戏影响研究 ${index + 1}`,
+          link: `https://game-source-${index + 1}.example.com/article`,
+          content: `电子游戏对心理健康、认知发展与社会行为的影响 ${index + 1}`.repeat(20),
+          media: `研究机构 ${index + 1}`,
+          publish_date: '2026-09-01',
+        })),
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    if (url.endsWith('/reader')) {
+      return new Response(JSON.stringify({
+        reader_result: { content: '电子游戏影响研究正文证据'.repeat(100) },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+    const body = JSON.parse(String(init?.body)) as {
+      messages?: Array<{ role?: string; content?: string }>
+    }
+    const prompt = body.messages?.map((message) => message.content ?? '').join('\n') ?? ''
+    if (prompt.includes('请评估这些证据是否足以回答')) {
+      evaluatorCallCount += 1
+      return qwenEvaluatorResponse({
+        status: 'insufficient',
+        evidenceNeeds: [],
+        followUpQueries: [],
+      })
+    }
+    synthesisCallCount += 1
+    return qwenEvaluatorResponse({
+      summary: '研究摘要',
+      insights: [{
+        title: '主要影响',
+        content: '游戏可能同时产生积极与消极影响。',
+        sourceUrls: ['https://game-source-1.example.com/article'],
+      }],
+      warnings: [],
+    })
+  }
+  try {
+    const gameStrategy: ResearchStrategy = {
+      ...strategy,
+      intent: {
+        normalizedTopic: '游戏对人的影响',
+        researchObject: '电子游戏参与者',
+        userIntent: '分析游戏对人的多维影响',
+        scope: ['电子游戏', '心理健康', '认知发展', '社会行为'],
+        excludedMeanings: [],
+        keyConcepts: ['电子游戏', '游戏影响'],
+        ambiguityDetected: false,
+      },
+      intentConfirmation: {
+        status: 'not_required',
+        candidates: [],
+      },
+      queryPlan: {
+        queries: [
+          { id: 'game-query-1', query: '电子游戏 心理健康 影响', purpose: '心理影响', priority: 1 },
+          { id: 'game-query-2', query: '电子游戏 认知发展 影响', purpose: '认知影响', priority: 2 },
+          { id: 'game-query-3', query: '电子游戏 社会行为 影响', purpose: '社会影响', priority: 3 },
+        ],
+      },
+    }
+    const result = await researchWithProviders({
+      ...request,
+      topic: '游戏对人的影响',
+      goal: gameStrategy.intent.userIntent,
+      researchStrategy: gameStrategy,
+      researchPlanContext: {
+        objective: gameStrategy.intent.userIntent,
+        scope: gameStrategy.intent.scope.join('；'),
+        questions: gameStrategy.queryPlan.queries.map((query, index) => ({
+          id: `game-question-${index + 1}`,
+          text: query.purpose,
+        })),
+        sourcePreferences: [],
+      },
+    }, {
+      onSynthesisStarted: () => { synthesisStartedCount += 1 },
+    })
+    assert.equal(searchCallCount, 3)
+    assert.equal(evaluatorCallCount, 1)
+    assert.equal(synthesisStartedCount, 1)
+    assert.equal(synthesisCallCount, 1)
+    assert.equal(result.summary, '研究摘要')
+    assert.equal(result.warnings.filter((warning) => warning === replanUnavailableWarning).length, 1)
+  } finally {
+    globalThis.fetch = originalFetch
+    Object.entries(environment).forEach(([name, value]) => {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    })
   }
 })
 
